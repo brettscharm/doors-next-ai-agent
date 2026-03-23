@@ -51,30 +51,29 @@ class DOORSNextClient:
     
     def authenticate(self) -> bool:
         """
-        Authenticate with DOORS Next using form-based authentication
+        Authenticate with DOORS Next using basic authentication
         
         Returns:
             True if authentication successful, False otherwise
         """
         try:
-            # Step 1: Get the login form
-            auth_url = f"{self.base_url.replace('/rm', '')}/jts/j_security_check"
+            # Use basic authentication
+            self.session.auth = (self.username, self.password)
             
-            # Step 2: Submit credentials
-            auth_data = {
-                'j_username': self.username,
-                'j_password': self.password
-            }
+            # Add required header to prevent OIDC redirect
+            self.session.headers.update({
+                'X-Requested-With': 'XMLHttpRequest'
+            })
             
-            response = self.session.post(auth_url, data=auth_data, allow_redirects=True)
+            # Test authentication by accessing rootservices
+            response = self.session.get(f"{self.base_url}/rootservices")
             
-            # Step 3: Verify authentication
-            if response.status_code == 200 and 'authfailed' not in response.url.lower():
+            if response.status_code == 200:
                 self._authenticated = True
                 print("✅ Successfully authenticated with DOORS Next")
                 return True
             else:
-                print("❌ Authentication failed")
+                print(f"❌ Authentication failed (Status: {response.status_code})")
                 return False
                 
         except Exception as e:
@@ -86,6 +85,531 @@ class DOORSNextClient:
         if not self._authenticated:
             if not self.authenticate():
                 raise Exception("Failed to authenticate with DOORS Next")
+    
+    def list_projects(self) -> List[Dict]:
+        """
+        List all DOORS Next RM projects from the OSLC catalog
+        
+        Returns:
+            List of project dictionaries with 'title', 'id', and 'url'
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Query the OSLC RM service provider catalog
+            url = f"{self.base_url}/oslc_rm/catalog"
+            headers = {
+                'Accept': 'application/rdf+xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                # Parse XML response
+                root = ET.fromstring(response.content)
+                
+                # Define namespaces
+                namespaces = {
+                    'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                    'dcterms': 'http://purl.org/dc/terms/',
+                    'oslc': 'http://open-services.net/ns/core#'
+                }
+                
+                projects = []
+                # Find all ServiceProvider entries
+                for sp in root.findall('.//oslc:ServiceProvider', namespaces):
+                    title_elem = sp.find('dcterms:title', namespaces)
+                    about_attr = sp.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about')
+                    
+                    if title_elem is not None and about_attr:
+                        project = {
+                            'title': title_elem.text,
+                            'url': about_attr,
+                            'id': about_attr.split('/')[-1] if '/' in about_attr else about_attr
+                        }
+                        projects.append(project)
+                
+                print(f"✅ Found {len(projects)} projects")
+                return projects
+            else:
+                print(f"❌ Failed to list projects: {response.status_code}")
+                return []
+                
+        except Exception as e:
+            print(f"❌ Error listing projects: {str(e)}")
+            return []
+    
+    def get_modules(self, project_url: str, recursive: bool = True) -> List[Dict]:
+        """
+        Get modules/folders from a specific project using OSLC Folder Query Capability
+        
+        This method uses the OSLC folder query capability to find all modules and folders
+        in a DOORS Next project. It can optionally retrieve nested folders recursively.
+        
+        Args:
+            project_url: The project's service provider URL (e.g., from list_projects())
+            recursive: If True, recursively fetch all nested folders (default: True)
+            
+        Returns:
+            List of module dictionaries with 'title', 'id', 'url', 'level', 'created', 'modified'
+            
+        Example:
+            projects = client.list_projects()
+            bob_project = projects[6]  # Project 7 (0-indexed)
+            modules = client.get_modules(bob_project['url'])
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Define namespaces for XML parsing
+            namespaces = {
+                'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'dcterms': 'http://purl.org/dc/terms/',
+                'oslc': 'http://open-services.net/ns/core#',
+                'nav': 'http://jazz.net/ns/rm/navigation#',
+                'rm': 'http://www.ibm.com/xmlns/rdm/rdf/'
+            }
+            
+            headers = {
+                'Accept': 'application/rdf+xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            # Convert service provider URL to project area URL
+            # From: https://.../rm/oslc_rm/_gtcOgCR9EfG2I_bh4PQ0Og/services.xml
+            # To:   https://.../rm/process/project-areas/_gtcOgCR9EfG2I_bh4PQ0Og
+            project_area_url = project_url.replace('/oslc_rm/', '/process/project-areas/').replace('/services.xml', '')
+            
+            # Query for root folder using OSLC Folder Query Capability
+            query_url = f"{self.base_url}/folders"
+            params = {
+                'oslc.where': f'public_rm:parent={project_area_url}',
+                'oslc.select': '*'
+            }
+            
+            response = self.session.get(query_url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get modules: {response.status_code}")
+                return []
+            
+            all_modules = []
+            root = ET.fromstring(response.content)
+            
+            # Find root folder(s)
+            for item in root.findall('.//{http://jazz.net/ns/rm/navigation#}folder', namespaces):
+                title_elem = item.find('dcterms:title', namespaces)
+                about_attr = item.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about')
+                identifier_elem = item.find('dcterms:identifier', namespaces)
+                created_elem = item.find('dcterms:created', namespaces)
+                modified_elem = item.find('dcterms:modified', namespaces)
+                
+                if title_elem is not None and about_attr:
+                    module = {
+                        'title': title_elem.text,
+                        'url': about_attr,
+                        'id': identifier_elem.text if identifier_elem is not None else about_attr.split('/')[-1],
+                        'created': created_elem.text if created_elem is not None else '',
+                        'modified': modified_elem.text if modified_elem is not None else '',
+                        'level': 0
+                    }
+                    all_modules.append(module)
+                    
+                    # Recursively get child folders if requested
+                    if recursive:
+                        children = self._get_child_folders(about_attr, namespaces, level=1)
+                        all_modules.extend(children)
+            
+            print(f"✅ Found {len(all_modules)} modules/folders")
+            return all_modules
+            
+        except Exception as e:
+            print(f"❌ Error getting modules: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _get_child_folders(self, parent_url: str, namespaces: dict, level: int = 1) -> List[Dict]:
+        """
+        Recursively get all child folders of a parent folder
+        
+        Args:
+            parent_url: URL of the parent folder
+            namespaces: XML namespaces for parsing
+            level: Current nesting level (for display purposes)
+            
+        Returns:
+            List of child folder dictionaries
+        """
+        folders = []
+        
+        try:
+            query_url = f"{self.base_url}/folders"
+            params = {
+                'oslc.where': f'nav:parent={parent_url}',
+                'oslc.select': '*',
+                'oslc.pageSize': '100'
+            }
+            
+            headers = {
+                'Accept': 'application/rdf+xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(query_url, params=params, headers=headers)
+            
+            if response.status_code == 200:
+                root = ET.fromstring(response.content)
+                
+                for item in root.findall('.//{http://jazz.net/ns/rm/navigation#}folder', namespaces):
+                    title_elem = item.find('dcterms:title', namespaces)
+                    about_attr = item.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about')
+                    identifier_elem = item.find('dcterms:identifier', namespaces)
+                    created_elem = item.find('dcterms:created', namespaces)
+                    modified_elem = item.find('dcterms:modified', namespaces)
+                    
+                    if title_elem is not None and about_attr:
+                        folder = {
+                            'title': title_elem.text,
+                            'url': about_attr,
+                            'id': identifier_elem.text if identifier_elem is not None else about_attr.split('/')[-1],
+                            'created': created_elem.text if created_elem is not None else '',
+                            'modified': modified_elem.text if modified_elem is not None else '',
+                            'level': level
+                        }
+                        folders.append(folder)
+                        
+                        # Recursively get children
+                        children = self._get_child_folders(about_attr, namespaces, level + 1)
+                        folders.extend(children)
+        
+        except Exception as e:
+            # Silently continue if we can't get children
+            pass
+        
+        return folders
+    def get_requirements_from_project(self, project_url: str) -> List[Dict]:
+        """
+        Get requirements from a specific project using the Reportable API
+        
+        Args:
+            project_url: The project's service provider URL
+            
+        Returns:
+            List of requirement dictionaries with 'id', 'title', 'description', 'status'
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Try the publish/resources endpoint without resourceType first
+            url = f"{self.base_url}/publish/resources"
+            params = {
+                'projectURL': project_url
+            }
+            
+            headers = {
+                'Accept': 'application/xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get requirements (attempt 1): {response.status_code}")
+                
+                # Try with resourceType parameter
+                params['resourceType'] = 'Requirement'
+                response = self.session.get(url, params=params, headers=headers)
+                
+                if response.status_code != 200:
+                    print(f"❌ Failed to get requirements (attempt 2): {response.status_code}")
+                    
+                    # Try with oslc.where filter instead
+                    params = {
+                        'projectURL': project_url,
+                        'oslc.where': 'rdf:type=<http://open-services.net/ns/rm#Requirement>'
+                    }
+                    response = self.session.get(url, params=params, headers=headers)
+                    
+                    if response.status_code != 200:
+                        print(f"❌ Failed to get requirements (attempt 3): {response.status_code}")
+                        print(f"Response: {response.text[:200]}")
+                        return []
+            
+            # Parse XML response
+            root = ET.fromstring(response.content)
+            
+            # Define namespaces
+            namespaces = {
+                'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'dcterms': 'http://purl.org/dc/terms/',
+                'oslc': 'http://open-services.net/ns/core#',
+                'rm': 'http://www.ibm.com/xmlns/rdm/rdf/',
+                'oslc_rm': 'http://open-services.net/ns/rm#'
+            }
+            
+            requirements = []
+            
+            # Find all requirement entries
+            for req_elem in root.findall('.//oslc_rm:Requirement', namespaces):
+                # Extract requirement details
+                req_id = req_elem.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about', '')
+                
+                # Get title
+                title_elem = req_elem.find('dcterms:title', namespaces)
+                title = title_elem.text if title_elem is not None and title_elem.text else 'Untitled'
+                
+                # Get description
+                desc_elem = req_elem.find('dcterms:description', namespaces)
+                description = desc_elem.text if desc_elem is not None and desc_elem.text else ''
+                
+                # Get identifier (requirement ID like REQ-123)
+                identifier_elem = req_elem.find('dcterms:identifier', namespaces)
+                identifier = identifier_elem.text if identifier_elem is not None and identifier_elem.text else ''
+                
+                # Get status
+                status_elem = req_elem.find('oslc_rm:status', namespaces)
+                status = status_elem.text if status_elem is not None and status_elem.text else 'Unknown'
+                
+                # Get type
+                type_elem = req_elem.find('dcterms:type', namespaces)
+                req_type = type_elem.text if type_elem is not None and type_elem.text else 'Requirement'
+                
+                requirement = {
+                    'id': identifier or req_id.split('/')[-1] if req_id else 'N/A',
+                    'title': title,
+                    'description': description,
+                    'status': status,
+                    'type': req_type,
+                    'url': req_id
+                }
+                
+                requirements.append(requirement)
+            
+            print(f"✅ Found {len(requirements)} requirements")
+            return requirements
+            
+        except Exception as e:
+            print(f"❌ Error getting requirements: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def get_requirements_from_module(self, module_id: str) -> List[Dict]:
+        """
+        Get requirements from a specific module using the Reportable API
+        
+        Args:
+            module_id: The module's ID (e.g., '985621')
+            
+        Returns:
+            List of requirement dictionaries with 'id', 'title', 'description', 'status'
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Use the Reportable API to get resources from a specific module
+            url = f"{self.base_url}/publish/resources"
+            params = {
+                'moduleURI': f"{self.base_url}/resources/{module_id}",
+                'resourceType': 'Requirement'
+            }
+            
+            headers = {
+                'Accept': 'application/xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get requirements from module: {response.status_code}")
+                # Try without resourceType
+                params = {
+                    'moduleURI': f"{self.base_url}/resources/{module_id}"
+                }
+                response = self.session.get(url, params=params, headers=headers)
+                
+                if response.status_code != 200:
+                    print(f"❌ Failed again: {response.status_code}")
+                    print(f"Response: {response.text[:300]}")
+                    return []
+            
+            # Parse XML response
+            root = ET.fromstring(response.content)
+            
+            # Define namespaces
+            namespaces = {
+                'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'dcterms': 'http://purl.org/dc/terms/',
+                'oslc': 'http://open-services.net/ns/core#',
+                'rm': 'http://www.ibm.com/xmlns/rdm/rdf/',
+                'oslc_rm': 'http://open-services.net/ns/rm#'
+            }
+            
+            requirements = []
+            
+            # Find all requirement entries
+            for req_elem in root.findall('.//oslc_rm:Requirement', namespaces):
+                # Extract requirement details
+                req_id = req_elem.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about', '')
+                
+                # Get title
+                title_elem = req_elem.find('dcterms:title', namespaces)
+                title = title_elem.text if title_elem is not None and title_elem.text else 'Untitled'
+                
+                # Get description
+                desc_elem = req_elem.find('dcterms:description', namespaces)
+                description = desc_elem.text if desc_elem is not None and desc_elem.text else ''
+                
+                # Get identifier (requirement ID like REQ-123)
+                identifier_elem = req_elem.find('dcterms:identifier', namespaces)
+                identifier = identifier_elem.text if identifier_elem is not None and identifier_elem.text else ''
+                
+                # Get status
+                status_elem = req_elem.find('oslc_rm:status', namespaces)
+                status = status_elem.text if status_elem is not None and status_elem.text else 'Unknown'
+                
+                # Get type
+                type_elem = req_elem.find('dcterms:type', namespaces)
+                req_type = type_elem.text if type_elem is not None and type_elem.text else 'Requirement'
+                
+                requirement = {
+                    'id': identifier or req_id.split('/')[-1] if req_id else 'N/A',
+                    'title': title,
+                    'description': description,
+                    'status': status,
+                    'type': req_type,
+                    'url': req_id
+                }
+                
+                requirements.append(requirement)
+            
+            print(f"✅ Found {len(requirements)} requirements in module")
+            return requirements
+            
+        except Exception as e:
+            print(f"❌ Error getting requirements from module: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def count_artifacts_in_module(self, module_id: str) -> int:
+        """
+        Count the number of artifacts (requirements) in a specific module
+        
+        Args:
+            module_id: The module's ID (e.g., 'FR_gy59UCR9EfG2I_bh4PQ0Og')
+            
+        Returns:
+            Count of artifacts in the module
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Use the Reportable API to count resources in a module
+            url = f"{self.base_url}/publish/resources"
+            params = {
+                'moduleURI': f"{self.base_url}/resources/{module_id}"
+            }
+            
+            headers = {
+                'Accept': 'application/xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"⚠️ Could not count artifacts in module {module_id}: {response.status_code}")
+                return 0
+            
+            # Parse XML response to count requirements
+            root = ET.fromstring(response.content)
+            
+            # Define namespaces
+            namespaces = {
+                'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'dcterms': 'http://purl.org/dc/terms/',
+                'oslc': 'http://open-services.net/ns/core#',
+                'rm': 'http://www.ibm.com/xmlns/rdm/rdf/',
+                'oslc_rm': 'http://open-services.net/ns/rm#'
+            }
+            
+            # Count all requirement entries
+            requirements = root.findall('.//oslc_rm:Requirement', namespaces)
+            count = len(requirements)
+            
+            return count
+            
+        except Exception as e:
+            print(f"⚠️ Error counting artifacts in module: {str(e)}")
+            return 0
+    
+    def get_module_with_artifact_count(self, module_url: str) -> Dict:
+        """
+        Get module information including artifact count
+        
+        Args:
+            module_url: The module's URL
+            
+        Returns:
+            Dictionary with module info including artifact count
+        """
+        self._ensure_authenticated()
+        
+        try:
+            headers = {
+                'Accept': 'application/rdf+xml',
+                'OSLC-Core-Version': '2.0'
+            }
+            
+            response = self.session.get(module_url, headers=headers)
+            
+            if response.status_code != 200:
+                return None
+            
+            # Parse module metadata
+            root = ET.fromstring(response.content)
+            
+            namespaces = {
+                'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                'dcterms': 'http://purl.org/dc/terms/',
+                'nav': 'http://jazz.net/ns/rm/navigation#'
+            }
+            
+            folder = root.find('.//{http://jazz.net/ns/rm/navigation#}folder', namespaces)
+            
+            if folder is None:
+                return None
+            
+            # Extract module info
+            title_elem = folder.find('dcterms:title', namespaces)
+            desc_elem = folder.find('dcterms:description', namespaces)
+            about_attr = folder.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about')
+            
+            module_id = about_attr.split('/')[-1] if about_attr else None
+            
+            if not module_id:
+                return None
+            
+            # Get artifact count
+            artifact_count = self.count_artifacts_in_module(module_id)
+            
+            module_info = {
+                'title': title_elem.text if title_elem is not None else 'Untitled',
+                'description': desc_elem.text if desc_elem is not None else '',
+                'url': about_attr,
+                'id': module_id,
+                'artifact_count': artifact_count
+            }
+            
+            return module_info
+            
+        except Exception as e:
+            print(f"⚠️ Error getting module with artifact count: {str(e)}")
+            return None
     
     def get_project_info(self) -> Dict:
         """
@@ -309,6 +833,261 @@ class DOORSNextClient:
                 f.write("---\n\n")
         
         print(f"✅ Exported {len(requirements)} requirements to {filename}")
+    
+    def get_modules_reportable_api(self, project_area_id: str) -> List[Dict]:
+        """
+        Get modules from a project using the Reportable REST API
+        
+        Args:
+            project_area_id: The project area ID (e.g., '_gtcOgCR9EfG2I_bh4PQ0Og')
+            
+        Returns:
+            List of module dictionaries with 'title', 'id', 'url', 'format'
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Build project area URL
+            project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
+            
+            # Use Reportable REST API to get modules
+            url = f"{self.base_url}/publish/modules"
+            params = {
+                'projectURI': project_area_url
+            }
+            
+            headers = {
+                'Accept': 'application/xml',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+            
+            response = self.session.get(url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get modules: {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+                return []
+            
+            # Parse XML response
+            root = ET.fromstring(response.content)
+            
+            # Define namespaces for Reportable REST API
+            namespaces = {
+                'ds': 'http://jazz.net/xmlns/prod/jazz/reporting/datasource/1.0/',
+                'rrm': 'http://www.ibm.com/xmlns/rdm/reportablerest/',
+                'attribute': 'http://jazz.net/xmlns/prod/jazz/reporting/attribute/1.0/'
+            }
+            
+            modules = []
+            
+            # Find all artifacts
+            for artifact in root.findall('.//ds:artifact', namespaces):
+                # Get format to identify modules
+                format_elem = artifact.find('rrm:format', namespaces)
+                format_value = format_elem.text if format_elem is not None else ''
+                
+                # Only include modules (format="Module")
+                if format_value == 'Module':
+                    # Get title
+                    title_elem = artifact.find('rrm:title', namespaces)
+                    title = title_elem.text if title_elem is not None else 'Untitled'
+                    
+                    # Get identifier
+                    identifier_elem = artifact.find('rrm:identifier', namespaces)
+                    identifier = identifier_elem.text if identifier_elem is not None else ''
+                    
+                    # Get URL
+                    url_elem = artifact.find('rrm:url', namespaces)
+                    module_url = url_elem.text if url_elem is not None else ''
+                    
+                    # Get modified date
+                    modified_elem = artifact.find('rrm:modified', namespaces)
+                    modified = modified_elem.text if modified_elem is not None else ''
+                    
+                    module = {
+                        'title': title,
+                        'id': identifier,
+                        'url': module_url,
+                        'format': format_value,
+                        'modified': modified
+                    }
+                    modules.append(module)
+            
+            print(f"✅ Found {len(modules)} modules using Reportable REST API")
+            return modules
+            
+        except Exception as e:
+            print(f"❌ Error getting modules: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def get_requirements_reportable_api(self, module_url: str) -> List[Dict]:
+        """
+        Get requirements from a module using the Reportable REST API
+        
+        Args:
+            module_url: The module's URL
+            
+        Returns:
+            List of requirement dictionaries with all attributes including custom ones
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Use Reportable REST API to get resources from module
+            url = f"{self.base_url}/publish/resources"
+            params = {
+                'moduleURI': module_url
+            }
+            
+            headers = {
+                'Accept': 'application/xml',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+            
+            response = self.session.get(url, params=params, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get requirements: {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+                return []
+            
+            # Parse XML response
+            root = ET.fromstring(response.content)
+            
+            # Define namespaces for Reportable REST API (actual response format)
+            namespaces = {
+                'ds': 'http://jazz.net/xmlns/alm/rm/datasource/v0.1',
+                'rrm': 'http://www.ibm.com/xmlns/rrm/1.0/',
+                'attribute': 'http://jazz.net/xmlns/alm/rm/attribute/v0.1'
+            }
+            
+            requirements = []
+            
+            # Find all artifacts
+            for artifact in root.findall('.//ds:artifact', namespaces):
+                # Get basic attributes
+                title_elem = artifact.find('rrm:title', namespaces)
+                title = title_elem.text if title_elem is not None else 'Untitled'
+                
+                identifier_elem = artifact.find('rrm:identifier', namespaces)
+                identifier = identifier_elem.text if identifier_elem is not None else ''
+                
+                description_elem = artifact.find('rrm:description', namespaces)
+                description = description_elem.text if description_elem is not None else ''
+                
+                about_elem = artifact.find('rrm:about', namespaces)
+                req_url = about_elem.text if about_elem is not None else ''
+                
+                format_elem = artifact.find('rrm:format', namespaces)
+                format_value = format_elem.text if format_elem is not None else ''
+                
+                # Get modified date from collaboration section
+                modified_elem = artifact.find('.//rrm:modified', namespaces)
+                modified = modified_elem.text if modified_elem is not None else ''
+                
+                # Get created date
+                created_elem = artifact.find('.//rrm:created', namespaces)
+                created = created_elem.text if created_elem is not None else ''
+                
+                # Get creator
+                creator_elem = artifact.find('.//rrm:creator/rrm:title', namespaces)
+                creator = creator_elem.text if creator_elem is not None else ''
+                
+                # Extract custom attributes from objectType
+                custom_attributes = {}
+                object_type_elem = artifact.find('.//attribute:objectType', namespaces)
+                if object_type_elem is not None:
+                    custom_attributes['objectType'] = object_type_elem.get('{http://jazz.net/xmlns/alm/rm/attribute/v0.1}name', '')
+                
+                # Look for other custom attributes
+                for attr in artifact.findall('.//attribute:attribute', namespaces):
+                    attr_name = attr.get('{http://jazz.net/xmlns/alm/rm/attribute/v0.1}name', '')
+                    attr_value = attr.text if attr.text else ''
+                    if attr_name:
+                        custom_attributes[attr_name] = attr_value
+                
+                requirement = {
+                    'id': identifier,
+                    'title': title,
+                    'description': description,
+                    'url': req_url,
+                    'format': format_value,
+                    'modified': modified,
+                    'created': created,
+                    'creator': creator,
+                    'custom_attributes': custom_attributes
+                }
+                
+                requirements.append(requirement)
+            
+            print(f"✅ Found {len(requirements)} requirements in module")
+            return requirements
+            
+        except Exception as e:
+            print(f"❌ Error getting requirements: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def get_all_requirements_from_project(self, project_area_id: str) -> Dict:
+        """
+        Get all requirements from all modules in a project using Reportable REST API
+        
+        Args:
+            project_area_id: The project area ID (e.g., '_gtcOgCR9EfG2I_bh4PQ0Og')
+            
+        Returns:
+            Dictionary with modules and their requirements
+        """
+        self._ensure_authenticated()
+        
+        try:
+            # Get all modules
+            print(f"\n📁 Fetching modules from project {project_area_id}...")
+            modules = self.get_modules_reportable_api(project_area_id)
+            
+            if not modules:
+                print("❌ No modules found")
+                return {'modules': [], 'total_requirements': 0}
+            
+            print(f"\n📋 Found {len(modules)} modules. Fetching requirements...\n")
+            
+            result = {
+                'project_area_id': project_area_id,
+                'modules': [],
+                'total_requirements': 0
+            }
+            
+            # Get requirements from each module
+            for i, module in enumerate(modules, 1):
+                print(f"[{i}/{len(modules)}] Processing: {module['title']}")
+                
+                requirements = self.get_requirements_reportable_api(module['url'])
+                
+                module_data = {
+                    'title': module['title'],
+                    'id': module['id'],
+                    'url': module['url'],
+                    'modified': module['modified'],
+                    'requirement_count': len(requirements),
+                    'requirements': requirements
+                }
+                
+                result['modules'].append(module_data)
+                result['total_requirements'] += len(requirements)
+                
+                print(f"   ✓ {len(requirements)} requirements found\n")
+            
+            print(f"\n✅ Complete! Total: {result['total_requirements']} requirements from {len(modules)} modules")
+            return result
+            
+        except Exception as e:
+            print(f"❌ Error getting all requirements: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {'modules': [], 'total_requirements': 0}
 
 
 if __name__ == "__main__":
