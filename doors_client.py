@@ -1,5 +1,6 @@
 """
 DOORS Next Generation API Client
+Built by Bob & Brett Scharmett
 Connects to IBM DOORS Next via OSLC and Reportable REST APIs
 """
 
@@ -13,7 +14,10 @@ import requests
 
 
 class DOORSNextClient:
-    """Client for IBM DOORS Next Generation"""
+    """Bob's client for IBM DOORS Next Generation"""
+
+    # Request timeout in seconds
+    _TIMEOUT = 60
 
     # Reportable REST API namespace variants (differ across DNG versions)
     _NS_VARIANTS = [
@@ -64,7 +68,10 @@ class DOORSNextClient:
             self.session.headers.update({
                 'X-Requested-With': 'XMLHttpRequest'  # Prevents OIDC redirect
             })
-            resp = self.session.get(f"{self.base_url}/rootservices")
+            resp = self.session.get(
+                f"{self.base_url}/rootservices",
+                timeout=self._TIMEOUT,
+            )
             if resp.status_code == 200:
                 self._authenticated = True
                 return True
@@ -98,7 +105,8 @@ class DOORSNextClient:
                 headers={
                     'Accept': 'application/rdf+xml',
                     'OSLC-Core-Version': '2.0',
-                }
+                },
+                timeout=self._TIMEOUT,
             )
             if resp.status_code != 200:
                 return []
@@ -141,7 +149,12 @@ class DOORSNextClient:
         return self._get_modules_oslc(project_url)
 
     def _get_modules_reportable(self, project_area_id: str) -> List[Dict]:
-        """Get modules via the Reportable REST API (publish/modules endpoint)"""
+        """Get modules via the Reportable REST API (publish/modules endpoint).
+
+        The /publish/modules endpoint already scopes results to module artifacts,
+        so we return ALL artifacts without filtering by format string (which can
+        vary across DNG versions and configurations).
+        """
         project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
 
         # Try different parameter names (varies by DNG version)
@@ -153,7 +166,8 @@ class DOORSNextClient:
                     headers={
                         'Accept': 'application/xml',
                         'X-Requested-With': 'XMLHttpRequest',
-                    }
+                    },
+                    timeout=self._TIMEOUT,
                 )
                 if resp.status_code != 200:
                     continue
@@ -166,51 +180,72 @@ class DOORSNextClient:
                     if modules:
                         return modules
 
-                # If we got a 200 but no modules parsed, try namespace-agnostic parsing
+                # If we got a 200 but no modules parsed, try namespace-agnostic
                 modules = self._parse_modules_agnostic(root)
                 if modules:
                     return modules
 
+            except requests.exceptions.Timeout:
+                continue
             except Exception:
                 continue
 
         return []
 
     def _parse_modules_xml(self, root: ET.Element, ns: dict) -> List[Dict]:
-        """Parse modules from Reportable REST API XML with specific namespaces"""
+        """Parse modules from Reportable REST API XML.
+
+        Returns ALL artifacts from the response — the /publish/modules endpoint
+        already scopes to modules, so no format filtering needed.
+        """
         modules = []
         for artifact in root.findall(f'.//{{{ns["ds"]}}}artifact'):
+            title_el = artifact.find(f'{{{ns["rrm"]}}}title')
+            id_el = artifact.find(f'{{{ns["rrm"]}}}identifier')
+            # DNG uses <rrm:about> for the resource URL (not <rrm:url>)
+            about_el = artifact.find(f'{{{ns["rrm"]}}}about')
+            url_el = artifact.find(f'{{{ns["rrm"]}}}url')
+            mod_el = artifact.find(f'{{{ns["rrm"]}}}modified')
             fmt_el = artifact.find(f'{{{ns["rrm"]}}}format')
-            fmt = fmt_el.text if fmt_el is not None else ''
 
-            # Only include actual Modules (not other artifact types)
-            if fmt == 'Module':
-                title_el = artifact.find(f'{{{ns["rrm"]}}}title')
-                id_el = artifact.find(f'{{{ns["rrm"]}}}identifier')
-                url_el = artifact.find(f'{{{ns["rrm"]}}}url')
-                mod_el = artifact.find(f'{{{ns["rrm"]}}}modified')
+            title = title_el.text if title_el is not None else 'Untitled'
+            # Skip artifacts with no title and no identifier (metadata noise)
+            if title == 'Untitled' and (id_el is None or not id_el.text):
+                continue
 
-                modules.append({
-                    'title': title_el.text if title_el is not None else 'Untitled',
-                    'id': id_el.text if id_el is not None else '',
-                    'url': url_el.text if url_el is not None else '',
-                    'modified': mod_el.text if mod_el is not None else '',
-                    'source': 'reportable_api',
-                })
+            # Prefer rrm:about for URL, fall back to rrm:url
+            module_url = ''
+            if about_el is not None and about_el.text:
+                module_url = about_el.text
+            elif url_el is not None and url_el.text:
+                module_url = url_el.text
+
+            modules.append({
+                'title': title,
+                'id': id_el.text if id_el is not None else '',
+                'url': module_url,
+                'modified': mod_el.text if mod_el is not None else '',
+                'format': fmt_el.text if fmt_el is not None else '',
+                'source': 'reportable_api',
+            })
 
         return modules
 
     def _parse_modules_agnostic(self, root: ET.Element) -> List[Dict]:
-        """Namespace-agnostic fallback: look for elements by local name"""
+        """Namespace-agnostic fallback: look for elements by local name.
+
+        Returns ALL artifacts — no format filtering.
+        """
         modules = []
         for elem in root.iter():
             local = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
             if local == 'artifact':
-                fmt = ''
                 title = 'Untitled'
                 identifier = ''
+                about = ''
                 url = ''
                 modified = ''
+                fmt = ''
 
                 for child in elem.iter():
                     child_local = child.tag.split('}')[-1] if '}' in child.tag else child.tag
@@ -220,17 +255,21 @@ class DOORSNextClient:
                         title = child.text
                     elif child_local == 'identifier' and child.text:
                         identifier = child.text
+                    elif child_local == 'about' and child.text:
+                        about = child.text
                     elif child_local == 'url' and child.text:
                         url = child.text
                     elif child_local == 'modified' and child.text:
                         modified = child.text
 
-                if fmt == 'Module':
+                # Skip empty artifacts
+                if title != 'Untitled' or identifier:
                     modules.append({
                         'title': title,
                         'id': identifier,
-                        'url': url,
+                        'url': about or url,
                         'modified': modified,
+                        'format': fmt,
                         'source': 'reportable_api',
                     })
 
@@ -253,7 +292,8 @@ class DOORSNextClient:
                 headers={
                     'Accept': 'application/rdf+xml',
                     'OSLC-Core-Version': '2.0',
-                }
+                },
+                timeout=self._TIMEOUT,
             )
             if resp.status_code != 200:
                 return []
@@ -272,6 +312,7 @@ class DOORSNextClient:
                         'url': about,
                         'id': id_el.text if id_el is not None else about.split('/')[-1],
                         'modified': '',
+                        'format': '',
                         'source': 'oslc_folders',
                     })
 
@@ -298,7 +339,8 @@ class DOORSNextClient:
                 headers={
                     'Accept': 'application/rdf+xml',
                     'OSLC-Core-Version': '2.0',
-                }
+                },
+                timeout=self._TIMEOUT,
             )
             if resp.status_code != 200:
                 return []
@@ -315,6 +357,7 @@ class DOORSNextClient:
                         'url': about,
                         'id': id_el.text if id_el is not None else about.split('/')[-1],
                         'modified': '',
+                        'format': '',
                         'level': level,
                         'source': 'oslc_folders',
                     })
@@ -342,7 +385,8 @@ class DOORSNextClient:
                     headers={
                         'Accept': 'application/xml',
                         'X-Requested-With': 'XMLHttpRequest',
-                    }
+                    },
+                    timeout=120,  # Requirements can be large, give extra time
                 )
                 if resp.status_code != 200:
                     continue
@@ -365,13 +409,21 @@ class DOORSNextClient:
                 if reqs:
                     return reqs
 
+            except requests.exceptions.Timeout:
+                continue
             except Exception:
                 continue
 
         return []
 
+    # Known attribute namespace variants
+    _NS_ATTR_VARIANTS = [
+        'http://jazz.net/xmlns/alm/rm/attribute/v0.1',
+        'http://jazz.net/xmlns/prod/jazz/reporting/attribute/1.0/',
+    ]
+
     def _parse_reqs_reportable(self, root: ET.Element, ns: dict) -> List[Dict]:
-        """Parse requirements from Reportable REST API XML"""
+        """Parse requirements from Reportable REST API XML, including custom attributes"""
         reqs = []
         for artifact in root.findall(f'.//{{{ns["ds"]}}}artifact'):
             title_el = artifact.find(f'{{{ns["rrm"]}}}title')
@@ -382,6 +434,20 @@ class DOORSNextClient:
             modified_el = artifact.find(f'.//{{{ns["rrm"]}}}modified')
             created_el = artifact.find(f'.//{{{ns["rrm"]}}}created')
 
+            # Extract objectType and custom attributes
+            artifact_type = ''
+            custom_attributes = {}
+            for ns_attr in self._NS_ATTR_VARIANTS:
+                for obj_type in artifact.findall(f'.//{{{ns_attr}}}objectType'):
+                    artifact_type = obj_type.get(f'{{{ns_attr}}}name', '')
+                    for custom_attr in obj_type.findall(f'{{{ns_attr}}}customAttribute'):
+                        attr_name = custom_attr.get(f'{{{ns_attr}}}name', '')
+                        attr_value = custom_attr.get(f'{{{ns_attr}}}value', '')
+                        if attr_name and attr_name != 'Identifier':
+                            custom_attributes[attr_name] = attr_value
+                if artifact_type:
+                    break
+
             reqs.append({
                 'id': id_el.text if id_el is not None else '',
                 'title': title_el.text if title_el is not None else 'Untitled',
@@ -390,6 +456,8 @@ class DOORSNextClient:
                 'format': fmt_el.text if fmt_el is not None else '',
                 'modified': modified_el.text if modified_el is not None else '',
                 'created': created_el.text if created_el is not None else '',
+                'artifact_type': artifact_type,
+                'custom_attributes': custom_attributes,
             })
 
         return reqs
@@ -492,3 +560,6 @@ class DOORSNextClient:
                 if req.get('modified'):
                     f.write(f"*Last modified: {req['modified']}*\n\n")
                 f.write("---\n\n")
+
+
+# Built by Bob & Brett Scharmett

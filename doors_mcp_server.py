@@ -355,7 +355,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             ]
 
             for i, req in enumerate(requirements, 1):
-                lines.append(f"{i}. **{req['title']}**")
+                # Show artifact type tag if available
+                type_tag = f" [{req['artifact_type']}]" if req.get('artifact_type') else ""
+                lines.append(f"{i}. **{req['title']}**{type_tag}")
                 if req.get('id'):
                     lines.append(f"   - ID: `{req['id']}`")
                 if req.get('description'):
@@ -365,6 +367,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     lines.append(f"   - Description: {desc}")
                 if req.get('status'):
                     lines.append(f"   - Status: {req['status']}")
+                # Show custom attributes
+                custom = req.get('custom_attributes', {})
+                if custom:
+                    attrs_str = ", ".join(f"{k}: {v}" for k, v in custom.items())
+                    lines.append(f"   - Attributes: {attrs_str}")
 
             lines.append(
                 f"\nWould you like to save these requirements to a file? "
