@@ -37,7 +37,7 @@ When a user says "connect to DNG" and the `doors-next` MCP server is NOT availab
 
 5. After restart, proceed to the workflow below.
 
-## Workflow (After MCP Server Is Running)
+## Reading Requirements
 
 ### 1. Get Credentials and Connect
 Ask the user for their DOORS Next **URL**, **username**, and **password**.
@@ -56,6 +56,31 @@ When the user picks a module, call `get_module_requirements` with the project an
 After showing requirements, ask if they want to save them to this project.
 If yes, call `save_requirements` with their preferred format (json, csv, or markdown).
 
+## Writing Requirements
+
+### When the user asks to generate/create requirements:
+
+1. **First call `get_artifact_types`** for the target project to see what types are available (System Requirement, Heading, User Requirement, etc.)
+
+2. **Generate the requirements** based on the user's input. For each requirement you need:
+   - `title` — the requirement statement
+   - `content` — detailed body text, acceptance criteria, rationale
+   - `artifact_type` — must match a type from step 1 (e.g., "System Requirement", "Heading")
+
+3. **Show the user what you're about to create** and ask for confirmation before writing.
+
+4. **Call `create_requirements`** with the project and the array of requirements.
+
+5. **Tell the user:** "I created X requirements in the 'AI Generated Artifacts' folder in DNG. Please review them and move the ones you approve into the appropriate module."
+
+### Write Rules
+- ALL created requirements are automatically prefixed with `[AI Generated]`
+- ALL created requirements go into the "AI Generated Artifacts" folder (auto-created)
+- NEVER modify or overwrite existing requirements — only create new ones
+- NEVER touch Approved requirements
+- ALWAYS show the user what will be created and get confirmation before writing
+- The human is responsible for moving artifacts into modules and setting approval status
+
 ## Tools Quick Reference
 
 | Tool | What it does | Parameters |
@@ -64,7 +89,9 @@ If yes, call `save_requirements` with their preferred format (json, csv, or mark
 | `list_projects` | List all projects | none |
 | `get_modules` | Get modules from a project | project_identifier |
 | `get_module_requirements` | Get requirements from a module | project_identifier, module_identifier |
-| `save_requirements` | Save requirements to file | format (json/csv/markdown), filename (optional) |
+| `save_requirements` | Save requirements to local file | format (json/csv/markdown), filename (optional) |
+| `get_artifact_types` | List artifact types for a project | project_identifier |
+| `create_requirements` | Create requirements in DNG | project_identifier, requirements[] |
 
 ## Rules
 

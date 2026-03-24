@@ -532,6 +532,315 @@ class DOORSNextClient:
 
         return reqs
 
+    # ── Write: Folders ────────────────────────────────────────
+
+    def create_folder(self, project_url: str, folder_name: str, parent_folder_url: Optional[str] = None) -> Optional[Dict]:
+        """Create a folder in a DNG project.
+
+        If parent_folder_url is None, creates under the project root folder.
+        Returns dict with 'title' and 'url' of the created folder, or None on failure.
+        """
+        self._ensure_auth()
+        project_area_id = self._extract_project_area_id(project_url)
+        project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
+
+        # Find parent folder (root if not specified)
+        if not parent_folder_url:
+            parent_folder_url = self._get_root_folder_url(project_url)
+            if not parent_folder_url:
+                return None
+
+        folder_rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:nav="http://jazz.net/ns/rm/navigation#"
+         xmlns:process="http://jazz.net/ns/process#"
+         xmlns:oslc_config="http://open-services.net/ns/config#">
+  <nav:folder>
+    <dcterms:title>{folder_name}</dcterms:title>
+    <nav:parent rdf:resource="{parent_folder_url}"/>
+    <process:projectArea rdf:resource="{project_area_url}"/>
+  </nav:folder>
+</rdf:RDF>'''
+
+        import urllib.parse
+        encoded_pa = urllib.parse.quote(project_area_url, safe='')
+
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/folders?projectURL={encoded_pa}",
+                data=folder_rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code in [200, 201]:
+                return {
+                    'title': folder_name,
+                    'url': resp.headers.get('Location', ''),
+                }
+            return None
+        except Exception:
+            return None
+
+    def _get_root_folder_url(self, project_url: str) -> Optional[str]:
+        """Get the root folder URL for a project"""
+        ns = self._NS_OSLC
+        project_area_url = project_url.replace(
+            '/oslc_rm/', '/process/project-areas/'
+        ).replace('/services.xml', '')
+
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/folders",
+                params={
+                    'oslc.where': f'public_rm:parent={project_area_url}',
+                    'oslc.select': '*',
+                },
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.content)
+            for item in root.findall(f'.//{{{ns["nav"]}}}folder'):
+                about = item.get(f'{{{ns["rdf"]}}}about')
+                if about:
+                    return about
+            return None
+        except Exception:
+            return None
+
+    def find_folder(self, project_url: str, folder_name: str) -> Optional[Dict]:
+        """Find an existing folder by name in a project"""
+        self._ensure_auth()
+        ns = self._NS_OSLC
+        project_area_url = project_url.replace(
+            '/oslc_rm/', '/process/project-areas/'
+        ).replace('/services.xml', '')
+
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/folders",
+                params={
+                    'oslc.where': f'public_rm:parent={project_area_url}',
+                    'oslc.select': '*',
+                },
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+
+            root = ET.fromstring(resp.content)
+
+            # Check root level and children
+            for item in root.findall(f'.//{{{ns["nav"]}}}folder'):
+                title_el = item.find('dcterms:title', ns)
+                about = item.get(f'{{{ns["rdf"]}}}about')
+                if title_el is not None and title_el.text == folder_name:
+                    return {'title': title_el.text, 'url': about}
+
+                # Check children of root
+                if about:
+                    child_result = self._find_child_folder(about, folder_name)
+                    if child_result:
+                        return child_result
+
+            return None
+        except Exception:
+            return None
+
+    def _find_child_folder(self, parent_url: str, folder_name: str) -> Optional[Dict]:
+        """Search for a folder by name in children of a parent folder"""
+        ns = self._NS_OSLC
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/folders",
+                params={
+                    'oslc.where': f'nav:parent={parent_url}',
+                    'oslc.select': '*',
+                    'oslc.pageSize': '100',
+                },
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+
+            root = ET.fromstring(resp.content)
+            for item in root.findall(f'.//{{{ns["nav"]}}}folder'):
+                title_el = item.find('dcterms:title', ns)
+                about = item.get(f'{{{ns["rdf"]}}}about')
+                if title_el is not None and title_el.text == folder_name:
+                    return {'title': title_el.text, 'url': about}
+            return None
+        except Exception:
+            return None
+
+    # ── Write: Requirements ───────────────────────────────────
+
+    def get_artifact_shapes(self, project_url: str) -> List[Dict]:
+        """Get all available artifact type shapes for a project.
+
+        Returns list of dicts with 'name' and 'url' for each shape.
+        """
+        self._ensure_auth()
+        try:
+            resp = self.session.get(
+                project_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+
+            root = ET.fromstring(resp.content)
+            ns = self._NS_OSLC
+
+            shape_urls = []
+            for rs in root.findall('.//oslc:resourceShape', ns):
+                shape_url = rs.get(f'{{{ns["rdf"]}}}resource', '')
+                if shape_url:
+                    shape_urls.append(shape_url)
+
+            # Resolve shape names
+            shapes = []
+            for shape_url in shape_urls:
+                try:
+                    resp2 = self.session.get(
+                        shape_url,
+                        headers={'Accept': 'application/rdf+xml'},
+                        timeout=15,
+                    )
+                    if resp2.status_code == 200:
+                        root2 = ET.fromstring(resp2.content)
+                        for elem in root2.iter():
+                            local = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                            if local == 'title' and elem.text:
+                                shapes.append({'name': elem.text, 'url': shape_url})
+                                break
+                except Exception:
+                    continue
+
+            return shapes
+        except Exception:
+            return []
+
+    def create_requirement(self, project_url: str, title: str, content: str,
+                           shape_url: str, folder_url: Optional[str] = None) -> Optional[Dict]:
+        """Create a requirement in DNG.
+
+        Args:
+            project_url: The project's service provider URL
+            title: Requirement title (will be prefixed with [AI Generated])
+            content: Rich text content as plain text (converted to XHTML)
+            shape_url: The artifact type shape URL (e.g., System Requirement)
+            folder_url: Optional folder URL to place the artifact in
+
+        Returns:
+            Dict with 'title' and 'url' of created requirement, or None on failure.
+        """
+        self._ensure_auth()
+        project_area_id = self._extract_project_area_id(project_url)
+        project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
+
+        import urllib.parse
+        encoded_pa = urllib.parse.quote(project_area_url, safe='')
+        creation_url = f"{self.base_url}/requirementFactory?projectURL={encoded_pa}"
+
+        # Prefix title with [AI Generated]
+        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+
+        # Convert plain text content to XHTML
+        xhtml_content = self._text_to_xhtml(content)
+
+        # Build folder reference if provided
+        folder_ref = ''
+        if folder_url:
+            folder_ref = f'<nav:parent rdf:resource="{folder_url}"/>'
+
+        rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:oslc_rm="http://open-services.net/ns/rm#"
+         xmlns:oslc="http://open-services.net/ns/core#"
+         xmlns:nav="http://jazz.net/ns/rm/navigation#">
+  <oslc_rm:Requirement>
+    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:description rdf:parseType="Literal">{xhtml_content}</dcterms:description>
+    <oslc:instanceShape rdf:resource="{shape_url}"/>
+    {folder_ref}
+  </oslc_rm:Requirement>
+</rdf:RDF>'''
+
+        try:
+            resp = self.session.post(
+                creation_url,
+                data=rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code == 201:
+                return {
+                    'title': prefixed_title,
+                    'url': resp.headers.get('Location', ''),
+                }
+            return None
+        except Exception:
+            return None
+
+    def _text_to_xhtml(self, text: str) -> str:
+        """Convert plain text to XHTML content for DNG description field"""
+        escaped = self._escape_xml(text)
+        paragraphs = escaped.split('\n\n')
+        xhtml_parts = []
+        for para in paragraphs:
+            para = para.strip()
+            if para:
+                # Check if it looks like a bullet list
+                lines = para.split('\n')
+                if all(line.strip().startswith('- ') or line.strip().startswith('* ') for line in lines if line.strip()):
+                    items = ''.join(f'<li>{line.strip().lstrip("- ").lstrip("* ")}</li>' for line in lines if line.strip())
+                    xhtml_parts.append(f'<ul>{items}</ul>')
+                else:
+                    xhtml_parts.append(f'<p>{para}</p>')
+
+        body = ''.join(xhtml_parts)
+        return f'<div xmlns="http://www.w3.org/1999/xhtml"><p><strong>[AI Generated by Bob]</strong></p>{body}</div>'
+
+    def _escape_xml(self, text: str) -> str:
+        """Escape special XML characters"""
+        return (text
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;')
+                .replace("'", '&apos;'))
+
     # ── Export ─────────────────────────────────────────────────
 
     def export_to_json(self, requirements: List[Dict], filepath: str):

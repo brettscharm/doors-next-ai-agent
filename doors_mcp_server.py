@@ -174,6 +174,65 @@ async def list_tools() -> list[Tool]:
                 "required": ["format"]
             }
         ),
+        Tool(
+            name="create_requirements",
+            description=(
+                "Create AI-generated requirements in a DOORS Next project. "
+                "Requirements are placed in an 'AI Generated Artifacts' folder "
+                "with [AI Generated] prefix. The human reviewer then moves them "
+                "into the appropriate module in DNG. "
+                "Each requirement needs a title, content, and artifact type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_identifier": {
+                        "type": "string",
+                        "description": "Project number or name"
+                    },
+                    "requirements": {
+                        "type": "array",
+                        "description": "Array of requirements to create",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "Requirement title (will be prefixed with [AI Generated])"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "Requirement body text with details and acceptance criteria"
+                                },
+                                "artifact_type": {
+                                    "type": "string",
+                                    "description": "Artifact type name (e.g., 'System Requirement', 'Heading', 'User Requirement')"
+                                }
+                            },
+                            "required": ["title", "content", "artifact_type"]
+                        }
+                    }
+                },
+                "required": ["project_identifier", "requirements"]
+            }
+        ),
+        Tool(
+            name="get_artifact_types",
+            description=(
+                "Get all available artifact types for a DOORS Next project. "
+                "Use this to find the correct artifact type names before creating requirements."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_identifier": {
+                        "type": "string",
+                        "description": "Project number or name"
+                    }
+                },
+                "required": ["project_identifier"]
+            }
+        ),
     ]
 
 
@@ -417,6 +476,134 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"- Module: {_last_module_name}\n"
                 f"- Project: {_last_project_name}"
             ))]
+
+        # ── get_artifact_types ─────────────────────────────────
+        elif name == "get_artifact_types":
+            proj_id = arguments.get("project_identifier", "")
+            if not proj_id:
+                return [TextContent(type="text", text="Error: project_identifier is required.")]
+
+            if not _projects_cache:
+                _projects_cache = client.list_projects()
+
+            project = _find_by_identifier(_projects_cache, proj_id)
+            if not project:
+                return [TextContent(type="text", text=f"Project not found: '{proj_id}'")]
+
+            shapes = client.get_artifact_shapes(project['url'])
+            if not shapes:
+                return [TextContent(type="text", text=(
+                    f"Could not retrieve artifact types for '{project['title']}'."
+                ))]
+
+            lines = [
+                f"# Artifact Types in '{project['title']}'\n",
+                f"Found **{len(shapes)}** type(s):\n",
+            ]
+            for i, s in enumerate(shapes, 1):
+                lines.append(f"{i}. **{s['name']}**")
+
+            lines.append(
+                "\nUse these type names with `create_requirements` "
+                "(e.g., 'System Requirement', 'Heading', 'User Requirement')."
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ── create_requirements ───────────────────────────────
+        elif name == "create_requirements":
+            proj_id = arguments.get("project_identifier", "")
+            reqs_data = arguments.get("requirements", [])
+
+            if not proj_id:
+                return [TextContent(type="text", text="Error: project_identifier is required.")]
+            if not reqs_data:
+                return [TextContent(type="text", text="Error: requirements array is empty.")]
+
+            if not _projects_cache:
+                _projects_cache = client.list_projects()
+
+            project = _find_by_identifier(_projects_cache, proj_id)
+            if not project:
+                return [TextContent(type="text", text=f"Project not found: '{proj_id}'")]
+
+            # Get artifact type shapes for this project
+            shapes = client.get_artifact_shapes(project['url'])
+            shape_map = {s['name'].lower(): s['url'] for s in shapes}
+
+            if not shape_map:
+                return [TextContent(type="text", text=(
+                    f"Could not retrieve artifact types for '{project['title']}'. "
+                    "Check your permissions."
+                ))]
+
+            # Find or create "AI Generated Artifacts" folder
+            folder = client.find_folder(project['url'], 'AI Generated Artifacts')
+            if not folder:
+                folder = client.create_folder(project['url'], 'AI Generated Artifacts')
+                if not folder:
+                    return [TextContent(type="text", text=(
+                        "Failed to create 'AI Generated Artifacts' folder. "
+                        "Check your write permissions for this project."
+                    ))]
+
+            folder_url = folder['url']
+
+            # Create each requirement
+            created = []
+            failed = []
+            for req in reqs_data:
+                title = req.get('title', '')
+                content = req.get('content', '')
+                artifact_type = req.get('artifact_type', 'System Requirement')
+
+                # Find the shape URL for this artifact type
+                shape_url = shape_map.get(artifact_type.lower())
+                if not shape_url:
+                    # Try partial match
+                    for name_key, url_val in shape_map.items():
+                        if artifact_type.lower() in name_key:
+                            shape_url = url_val
+                            break
+
+                if not shape_url:
+                    failed.append(f"'{title[:40]}' - unknown artifact type '{artifact_type}'")
+                    continue
+
+                result = client.create_requirement(
+                    project_url=project['url'],
+                    title=title,
+                    content=content,
+                    shape_url=shape_url,
+                    folder_url=folder_url,
+                )
+
+                if result:
+                    created.append(result)
+                else:
+                    failed.append(f"'{title[:40]}' - API error")
+
+            # Build response
+            lines = [
+                f"# Requirements Created in '{project['title']}'\n",
+                f"Folder: **AI Generated Artifacts**\n",
+                f"Created **{len(created)}** of {len(reqs_data)} requirement(s):\n",
+            ]
+
+            for i, r in enumerate(created, 1):
+                lines.append(f"{i}. {r['title']}")
+
+            if failed:
+                lines.append(f"\n**Failed ({len(failed)}):**")
+                for f_msg in failed:
+                    lines.append(f"- {f_msg}")
+
+            lines.append(
+                "\n**Next step:** Open DNG and review the requirements in the "
+                "'AI Generated Artifacts' folder. Move approved ones into the "
+                "appropriate module."
+            )
+
+            return [TextContent(type="text", text="\n".join(lines))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
