@@ -89,24 +89,25 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="connect_to_dng",
             description=(
-                "Connect to IBM DOORS Next Generation with credentials. "
-                "Returns the number of available projects. "
-                "Use this if no .env file is configured."
+                "Connect to an IBM ELM server with credentials. "
+                "The URL can be the base server URL (e.g., https://server.com) "
+                "or the DNG URL ending in /rm — both work. "
+                "Returns the number of available DNG projects."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "DOORS Next server URL ending in /rm (e.g., https://your-server.com/rm)"
+                        "description": "ELM server URL (e.g., https://server.com or https://server.com/rm)"
                     },
                     "username": {
                         "type": "string",
-                        "description": "DOORS Next username"
+                        "description": "ELM username"
                     },
                     "password": {
                         "type": "string",
-                        "description": "DOORS Next password"
+                        "description": "ELM password"
                     }
                 },
                 "required": ["url", "username", "password"]
@@ -385,12 +386,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     try:
         # ── connect_to_dng ────────────────────────────────────
         if name == "connect_to_dng":
-            url = arguments.get("url", "").strip()
+            url = arguments.get("url", "").strip().rstrip('/')
             username = arguments.get("username", "").strip()
             password = arguments.get("password", "").strip()
 
             if not all([url, username, password]):
                 return [TextContent(type="text", text="Error: url, username, and password are all required.")]
+
+            # Auto-append /rm if the user gave the base server URL
+            if not url.endswith('/rm'):
+                url = f"{url}/rm"
 
             client = DOORSNextClient(url, username, password)
             if not client.authenticate():

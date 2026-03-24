@@ -39,9 +39,11 @@ When a user says "connect to DNG" and the `doors-next` MCP server is NOT availab
 
 ## Conversation Flow (Follow This Exactly)
 
+**CRITICAL RULE: NEVER call `create_requirements`, `create_task`, `create_test_case`, or `create_test_result` without showing the user a preview table FIRST and getting their explicit approval (e.g., "yes", "go ahead", "push them"). No exceptions.**
+
 ### Step 1: Connect
 Ask the user for their ELM server **URL**, **username**, and **password**.
-Call `connect_to_dng` with those values (URL should end in `/rm`).
+Call `connect_to_dng` with those values. The tool auto-appends `/rm` if needed — just pass whatever URL the user gives you. Do NOT lecture the user about DOORS Next vs DOORS Classic or URL formats.
 
 Tell the user:
 > "Successfully connected! There are X projects. Do you want me to list them all, or do you know which one we're working with?"
