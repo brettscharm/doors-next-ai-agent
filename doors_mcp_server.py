@@ -190,6 +190,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Project number or name"
                     },
+                    "folder_name": {
+                        "type": "string",
+                        "description": "Descriptive folder name. Format: 'AI Generated - [username] - [summary]' (e.g., 'AI Generated - brett.scharmett - Security Requirements')"
+                    },
                     "requirements": {
                         "type": "array",
                         "description": "Array of requirements to create",
@@ -213,7 +217,7 @@ async def list_tools() -> list[Tool]:
                         }
                     }
                 },
-                "required": ["project_identifier", "requirements"]
+                "required": ["project_identifier", "folder_name", "requirements"]
             }
         ),
         Tool(
@@ -512,10 +516,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # ── create_requirements ───────────────────────────────
         elif name == "create_requirements":
             proj_id = arguments.get("project_identifier", "")
+            folder_name = arguments.get("folder_name", "")
             reqs_data = arguments.get("requirements", [])
 
             if not proj_id:
                 return [TextContent(type="text", text="Error: project_identifier is required.")]
+            if not folder_name:
+                return [TextContent(type="text", text="Error: folder_name is required.")]
             if not reqs_data:
                 return [TextContent(type="text", text="Error: requirements array is empty.")]
 
@@ -536,13 +543,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "Check your permissions."
                 ))]
 
-            # Find or create "AI Generated Artifacts" folder
-            folder = client.find_folder(project['url'], 'AI Generated Artifacts')
+            # Find or create the named folder
+            folder = client.find_folder(project['url'], folder_name)
             if not folder:
-                folder = client.create_folder(project['url'], 'AI Generated Artifacts')
+                folder = client.create_folder(project['url'], folder_name)
                 if not folder:
                     return [TextContent(type="text", text=(
-                        "Failed to create 'AI Generated Artifacts' folder. "
+                        f"Failed to create '{folder_name}' folder. "
                         "Check your write permissions for this project."
                     ))]
 
@@ -585,7 +592,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Build response
             lines = [
                 f"# Requirements Created in '{project['title']}'\n",
-                f"Folder: **AI Generated Artifacts**\n",
+                f"Folder: **{folder_name}**\n",
                 f"Created **{len(created)}** of {len(reqs_data)} requirement(s):\n",
             ]
 
@@ -598,9 +605,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     lines.append(f"- {f_msg}")
 
             lines.append(
-                "\n**Next step:** Open DNG and review the requirements in the "
-                "'AI Generated Artifacts' folder. Move approved ones into the "
-                "appropriate module."
+                f"\n**Next step:** Open DNG and review the requirements in the "
+                f"'{folder_name}' folder. Move approved ones into the "
+                f"appropriate module."
             )
 
             return [TextContent(type="text", text="\n".join(lines))]

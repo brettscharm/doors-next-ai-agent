@@ -80,9 +80,15 @@ Ask these questions one at a time (not all at once). Wait for each answer before
 
 1. Call `get_artifact_types` for the project (to know what types are available)
 2. Generate the requirements based on all the user's answers
-3. **Present them in a clean, readable table** — NOT in code blocks. Use this format:
+3. **Build the folder name** using this format: `AI Generated - [username] - [short summary]`
+   - Example: `AI Generated - brett.scharmett - Security Requirements`
+   - Example: `AI Generated - john.doe - Smart Home Functional Reqs`
+   - Use the DNG username from the connect step and a 2-4 word summary of what was requested
+4. **Present them in a clean, readable table** — NOT in code blocks. Use this format:
 
    > Here are the **X requirements** I'd create in [project name]:
+   >
+   > **Folder:** AI Generated - brett.scharmett - Security Requirements
    >
    > | # | Type | Title | Description |
    > |---|------|-------|-------------|
@@ -92,13 +98,13 @@ Ask these questions one at a time (not all at once). Wait for each answer before
    >
    > **Want me to push these to DNG, or would you like to make changes first?**
 
-4. If the user wants changes — revise and show the updated table again
-5. Only after explicit confirmation (e.g., "yes", "go ahead", "push them") → call `create_requirements`
+5. If the user wants changes — revise and show the updated table again
+6. Only after explicit confirmation (e.g., "yes", "go ahead", "push them") → call `create_requirements` with the `folder_name`
 
 **Phase 3: Confirm delivery**
 
 Tell the user:
-> "Done! I created X requirements in the 'AI Generated Artifacts' folder in [project name]. Open DNG to review them — move the ones you approve into the appropriate module."
+> "Done! I created X requirements in the '[folder name]' folder in [project name]. Open DNG to review them — move the ones you approve into the appropriate module."
 
 ### After Either Path
 Ask: "Want to do anything else? I can read from another module, generate more requirements, or switch projects."
