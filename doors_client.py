@@ -147,6 +147,81 @@ class DOORSNextClient:
         except Exception:
             return []
 
+    # ── Search ────────────────────────────────────────────────
+
+    def search_requirements(self, project_url: str, query: str,
+                             max_results: int = 20) -> List[Dict]:
+        """Full-text search across all artifacts in a DNG project.
+
+        Uses the JFS Full-Text Search Service (Apache Lucene backed).
+
+        Args:
+            project_url: The project's service provider URL
+            query: Search terms (e.g., "security", "power backup")
+            max_results: Maximum results to return (default 20)
+
+        Returns:
+            List of dicts with 'title', 'url', 'summary' for matching artifacts.
+        """
+        self._ensure_auth()
+        project_area_id = self._extract_project_area_id(project_url)
+        project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
+
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/search",
+                params={
+                    'q': query,
+                    'projectArea': project_area_url,
+                },
+                headers={
+                    'Accept': 'application/xml',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+
+            root = ET.fromstring(resp.content)
+            ns_atom = 'http://www.w3.org/2005/Atom'
+            ns_os = 'http://a9.com/-/spec/opensearch/1.1/'
+
+            results = []
+            for entry in root.findall(f'{{{ns_atom}}}entry'):
+                title_el = entry.find(f'{{{ns_atom}}}title')
+                link_el = entry.find(f'{{{ns_atom}}}link')
+                summary_el = entry.find(f'{{{ns_atom}}}summary')
+                content_el = entry.find(f'{{{ns_atom}}}content')
+
+                href = link_el.get('href', '') if link_el is not None else ''
+                title_text = title_el.text if title_el is not None else ''
+
+                # Use the URL as fallback title if title is just a URL
+                display_title = title_text
+                if title_text.startswith('http'):
+                    # Extract a meaningful name from the URL
+                    display_title = title_text.split('/')[-1]
+
+                summary_text = ''
+                if summary_el is not None and summary_el.text:
+                    summary_text = summary_el.text.strip()
+                elif content_el is not None and content_el.text:
+                    summary_text = content_el.text.strip()[:200]
+
+                results.append({
+                    'title': display_title,
+                    'url': href or title_text,
+                    'summary': summary_text,
+                })
+
+                if len(results) >= max_results:
+                    break
+
+            return results
+        except Exception:
+            return []
+
     # ── Modules ───────────────────────────────────────────────
 
     def get_modules(self, project_url: str) -> List[Dict]:

@@ -191,6 +191,7 @@ Every artifact is:
 | Generate requirements (interview → preview → push) | DNG | `create_requirements` | ✅ |
 | Create folders | DNG | (internal) | ✅ |
 | Create links (25 types) | DNG | `create_requirements` | ✅ |
+| Full-text search | DNG | `search_requirements` | ✅ |
 | Artifact type discovery | DNG | `get_artifact_types` | ✅ |
 | Link type discovery | DNG | `get_link_types` | ✅ |
 | Update existing requirements | DNG | `update_requirement` | ✅ |

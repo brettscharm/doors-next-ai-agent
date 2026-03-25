@@ -4,23 +4,24 @@ IBM ELM MCP Server for IBM Bob
 Provides tools for Bob to interact with IBM Engineering Lifecycle Management (ELM)
 Covers DNG (requirements), EWM (work items), and ETM (test management)
 
-Tools (16):
+Tools (17):
   1.  connect_to_elm          - Connect with credentials
   2.  list_projects           - List DNG/EWM/ETM projects (domain parameter)
   3.  get_modules             - Get modules from a DNG project
   4.  get_module_requirements - Get requirements from a module
   5.  save_requirements       - Save requirements to a file (JSON/CSV/Markdown)
-  6.  get_artifact_types      - Discover artifact types for a DNG project
-  7.  get_link_types          - Discover link types for a DNG project
-  8.  create_requirements     - Create requirements with links in a descriptive folder
-  9.  update_requirement      - Update an existing requirement's title and/or content
-  10. create_baseline         - Create a baseline snapshot of a DNG project
-  11. list_baselines          - List existing baselines for a DNG project
-  12. compare_baselines       - Compare baseline vs current stream (shows diff)
-  13. extract_pdf             - Extract text from a PDF file for import into DNG
-  14. create_task             - Create an EWM Task with optional DNG requirement link
-  15. create_test_case        - Create an ETM Test Case with optional DNG requirement link
-  16. create_test_result      - Create an ETM Test Result (pass/fail) for a test case
+  6.  search_requirements     - Full-text search across all artifacts in a project
+  7.  get_artifact_types      - Discover artifact types for a DNG project
+  8.  get_link_types          - Discover link types for a DNG project
+  9.  create_requirements     - Create requirements with links in a descriptive folder
+  10. update_requirement      - Update an existing requirement's title and/or content
+  11. create_baseline         - Create a baseline snapshot of a DNG project
+  12. list_baselines          - List existing baselines for a DNG project
+  13. compare_baselines       - Compare baseline vs current stream (shows diff)
+  14. extract_pdf             - Extract text from a PDF file for import into DNG
+  15. create_task             - Create an EWM Task with optional DNG requirement link
+  16. create_test_case        - Create an ETM Test Case with optional DNG requirement link
+  17. create_test_result      - Create an ETM Test Result (pass/fail) for a test case
 """
 
 import os
@@ -271,6 +272,28 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["project_identifier"]
+            }
+        ),
+        Tool(
+            name="search_requirements",
+            description=(
+                "Full-text search across all artifacts in a DNG project. "
+                "Finds requirements, modules, and other artifacts matching the search terms. "
+                "Use this to quickly find specific requirements by keyword."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_identifier": {
+                        "type": "string",
+                        "description": "DNG project number or name"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search terms (e.g., 'security', 'power backup', 'login')"
+                    }
+                },
+                "required": ["project_identifier", "query"]
             }
         ),
         Tool(
@@ -918,6 +941,41 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"- Module: {_last_module_name}\n"
                 f"- Project: {_last_project_name}"
             ))]
+
+        # ── search_requirements ────────────────────────────────
+        elif name == "search_requirements":
+            proj_id = arguments.get("project_identifier", "")
+            query = arguments.get("query", "")
+
+            if not proj_id or not query:
+                return [TextContent(type="text", text="Error: project_identifier and query are required.")]
+
+            if not _projects_cache:
+                _projects_cache = client.list_projects()
+
+            project = _find_by_identifier(_projects_cache, proj_id)
+            if not project:
+                return [TextContent(type="text", text=f"Project not found: '{proj_id}'")]
+
+            results = client.search_requirements(project['url'], query)
+
+            if not results:
+                return [TextContent(type="text", text=(
+                    f"No results for '{query}' in '{project['title']}'."
+                ))]
+
+            lines = [
+                f"# Search Results for '{query}' in '{project['title']}'\n",
+                f"Found **{len(results)}** result(s):\n",
+            ]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. **{r['title']}**")
+                if r.get('url'):
+                    lines.append(f"   - URL: `{r['url']}`")
+                if r.get('summary'):
+                    lines.append(f"   - {r['summary'][:150]}")
+
+            return [TextContent(type="text", text="\n".join(lines))]
 
         # ── get_link_types ────────────────────────────────────
         elif name == "get_link_types":

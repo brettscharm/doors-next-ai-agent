@@ -317,6 +317,7 @@ Only proceed after the user explicitly confirms. If ALL requirements ARE Approve
 | `get_modules` | Get modules from a DNG project | project_identifier |
 | `get_module_requirements` | Get requirements with URLs from a module | project_identifier, module_identifier |
 | `save_requirements` | Save last-fetched requirements to file | format (json/csv/markdown), filename (optional) |
+| `search_requirements` | Full-text search across all artifacts in a project | project_identifier, query |
 | `get_artifact_types` | List valid artifact types for a project (call before `create_requirements`) | project_identifier |
 | `get_link_types` | List link types for a project (call before `create_requirements` if linking) | project_identifier |
 | `create_requirements` | Create requirements in DNG | project_identifier, folder_name, requirements[] |
