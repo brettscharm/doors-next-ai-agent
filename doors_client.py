@@ -956,9 +956,10 @@ class DOORSNextClient:
                     'title': prefixed_title,
                     'url': resp.headers.get('Location', ''),
                 }
-            return None
-        except Exception:
-            return None
+            error_msg = self._extract_oslc_error(resp.text)
+            return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {'error': str(e)}
 
     def update_requirement(self, requirement_url: str,
                             title: Optional[str] = None,

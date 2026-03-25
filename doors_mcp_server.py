@@ -95,7 +95,8 @@ async def list_tools() -> list[Tool]:
                 "Connect to an IBM ELM server with credentials. "
                 "The URL can be the base server URL (e.g., https://server.com) "
                 "or the DNG URL ending in /rm — both work. "
-                "Returns the number of available DNG projects."
+                "This single connection is used for ALL tools (DNG, EWM, and ETM). "
+                "Must be called before any other tool."
             ),
             inputSchema={
                 "type": "object",
@@ -139,7 +140,9 @@ async def list_tools() -> list[Tool]:
             name="get_modules",
             description=(
                 "Get all modules from a DOORS Next project. "
-                "Specify the project by its number (from list_projects) or by name."
+                "Modules are containers that hold requirements. "
+                "Call list_projects first to get project numbers. "
+                "To see actual requirements inside a module, use get_module_requirements next."
             ),
             inputSchema={
                 "type": "object",
@@ -156,7 +159,8 @@ async def list_tools() -> list[Tool]:
             name="get_module_requirements",
             description=(
                 "Get all requirements from a specific module within a project. "
-                "Specify both the project and module by number or name."
+                "Call get_modules first to get module numbers. "
+                "Returns requirement URLs needed by update_requirement, create_task, and create_test_case."
             ),
             inputSchema={
                 "type": "object",
@@ -176,7 +180,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="save_requirements",
             description=(
-                "Save the last fetched requirements to a file. "
+                "Save requirements to a file. "
+                "Requires get_module_requirements to have been called first in this session. "
                 "Supports JSON, CSV, and Markdown formats."
             ),
             inputSchema={
@@ -198,11 +203,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="create_requirements",
             description=(
-                "Create AI-generated requirements in a DOORS Next project. "
-                "Requirements are placed in a descriptive folder named "
-                "'AI Generated - [username] - [summary]' with [AI Generated] prefix. "
-                "The human reviewer then moves them into the appropriate module in DNG. "
-                "Each requirement needs a title, content, and artifact type."
+                "Create requirements in a DOORS Next project. "
+                "MUST call get_artifact_types first to get valid type names for this project. "
+                "Requirements are placed in a descriptive folder with [AI Generated] prefix auto-added. "
+                "Returns created requirement URLs needed by create_task and create_test_case."
             ),
             inputSchema={
                 "type": "object",
@@ -231,7 +235,7 @@ async def list_tools() -> list[Tool]:
                                 },
                                 "artifact_type": {
                                     "type": "string",
-                                    "description": "Artifact type name (e.g., 'System Requirement', 'Heading', 'User Requirement')"
+                                    "description": "Artifact type name — MUST match a name from get_artifact_types output for this project"
                                 },
                                 "link_type": {
                                     "type": "string",
@@ -239,7 +243,7 @@ async def list_tools() -> list[Tool]:
                                 },
                                 "link_to": {
                                     "type": "string",
-                                    "description": "Optional: URL of the requirement to link to"
+                                    "description": "Optional: URL of the requirement to link to (from get_module_requirements output). Must be provided together with link_type."
                                 }
                             },
                             "required": ["title", "content", "artifact_type"]
@@ -271,7 +275,8 @@ async def list_tools() -> list[Tool]:
             name="get_artifact_types",
             description=(
                 "Get all available artifact types for a DOORS Next project. "
-                "Use this to find the correct artifact type names before creating requirements."
+                "MUST be called before create_requirements — artifact types vary by project. "
+                "Returns the exact type names to use in the artifact_type field."
             ),
             inputSchema={
                 "type": "object",
@@ -379,7 +384,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "requirement_url": {
                         "type": "string",
-                        "description": "Optional: URL of a DNG requirement to link (Implements Requirement)"
+                        "description": "Optional: URL of a DNG requirement (from get_module_requirements or create_requirements output) to link via Implements Requirement"
                     }
                 },
                 "required": ["ewm_project", "title"]
@@ -409,7 +414,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "requirement_url": {
                         "type": "string",
-                        "description": "Optional: URL of a DNG requirement to link (Validates Requirement)"
+                        "description": "Optional: URL of a DNG requirement (from get_module_requirements or create_requirements output) to link via Validates Requirement"
                     }
                 },
                 "required": ["etm_project", "title"]
@@ -481,6 +486,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 ))]
 
             _client = client
+            # Clear all caches on new connection
+            _ewm_projects_cache.clear()
+            _etm_projects_cache.clear()
+            _modules_cache.clear()
+            _folder_cache.clear()
+            _last_requirements.clear()
+
             projects = _client.list_projects()
             _projects_cache = projects
 
@@ -876,10 +888,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     link_target_url=link_target,
                 )
 
-                if result:
+                if result and 'error' not in result:
                     created.append(result)
                 else:
-                    failed.append(f"'{title[:40]}' - API error")
+                    error_detail = result.get('error', 'API error') if result else 'API error'
+                    failed.append(f"'{title[:40]}' - {error_detail}")
 
             # Build response
             lines = [
