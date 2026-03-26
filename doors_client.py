@@ -56,6 +56,11 @@ class DOORSNextClient:
         return self.base_url
 
     @property
+    def _gc_url(self) -> str:
+        """GCM (Global Configuration) base URL"""
+        return f"{self._server_root}/gc"
+
+    @property
     def _ccm_url(self) -> str:
         """EWM (CCM) base URL"""
         return f"{self._server_root}/ccm"
@@ -1750,6 +1755,188 @@ class DOORSNextClient:
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
         except Exception as e:
             return {'error': str(e)}
+
+    # ── GCM (Global Configuration Management) ─────────────
+
+    def list_global_configurations(self) -> List[Dict]:
+        """List all global configurations (streams and baselines) from GCM.
+
+        Returns a list of dicts with 'title', 'url', 'id' for each configuration.
+        These span all ELM apps (DNG, EWM, ETM).
+        """
+        self._ensure_auth()
+        try:
+            resp = self.session.get(
+                f"{self._gc_url}/configuration",
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+
+            root = ET.fromstring(resp.content)
+            ns_rdf = self._NS_OSLC['rdf']
+            ns_dc = self._NS_OSLC['dcterms']
+
+            configs = []
+            for desc in root.findall(f'{{{ns_rdf}}}Description'):
+                about = desc.get(f'{{{ns_rdf}}}about', '')
+                if '/gc/configuration/' not in about:
+                    continue
+                title_el = desc.find(f'{{{ns_dc}}}title')
+                title = title_el.text.strip() if title_el is not None and title_el.text else ''
+                config_id = about.split('/')[-1]
+                configs.append({
+                    'title': title,
+                    'url': about,
+                    'id': config_id,
+                })
+
+            return configs
+        except Exception:
+            return []
+
+    def list_global_components(self) -> List[Dict]:
+        """List all components from GCM across DNG, EWM, and ETM.
+
+        Returns a list of dicts with 'title', 'url', 'id', 'configurations_url',
+        'project_area', 'created', 'modified'.
+        """
+        self._ensure_auth()
+        try:
+            resp = self.session.get(
+                f"{self._gc_url}/oslc-query/components",
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+
+            root = ET.fromstring(resp.content)
+            ns_rdf = self._NS_OSLC['rdf']
+            ns_dc = self._NS_OSLC['dcterms']
+            ns_config = 'http://open-services.net/ns/config#'
+            ns_process = 'http://jazz.net/ns/process#'
+
+            components = []
+            for desc in root.findall(f'{{{ns_rdf}}}Description'):
+                about = desc.get(f'{{{ns_rdf}}}about', '')
+                if '/gc/component/' not in about:
+                    continue
+
+                # Check it's actually a Component type
+                is_component = False
+                for type_el in desc.findall(f'{{{ns_rdf}}}type'):
+                    type_uri = type_el.get(f'{{{ns_rdf}}}resource', '')
+                    if 'Component' in type_uri:
+                        is_component = True
+                        break
+                if not is_component:
+                    continue
+
+                title_el = desc.find(f'{{{ns_dc}}}title')
+                title = title_el.text.strip() if title_el is not None and title_el.text else ''
+                id_el = desc.find(f'{{{ns_dc}}}identifier')
+                configs_el = desc.find(f'{{{ns_config}}}configurations')
+                pa_el = desc.find(f'{{{ns_process}}}projectArea')
+                created_el = desc.find(f'{{{ns_dc}}}created')
+                modified_el = desc.find(f'{{{ns_dc}}}modified')
+
+                components.append({
+                    'title': title,
+                    'url': about,
+                    'id': id_el.text if id_el is not None else about.split('/')[-1],
+                    'configurations_url': configs_el.get(f'{{{ns_rdf}}}resource', '') if configs_el is not None else '',
+                    'project_area': pa_el.get(f'{{{ns_rdf}}}resource', '') if pa_el is not None else '',
+                    'created': created_el.text if created_el is not None else '',
+                    'modified': modified_el.text if modified_el is not None else '',
+                })
+
+            return components
+        except Exception:
+            return []
+
+    def get_global_config_details(self, config_url: str) -> Optional[Dict]:
+        """Get details for a specific global configuration.
+
+        Returns dict with 'title', 'url', 'type' (stream/baseline),
+        'contributions' (list of component configs that participate).
+        """
+        self._ensure_auth()
+        try:
+            resp = self.session.get(
+                config_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+
+            root = ET.fromstring(resp.content)
+            ns_rdf = self._NS_OSLC['rdf']
+            ns_dc = self._NS_OSLC['dcterms']
+            ns_config = 'http://open-services.net/ns/config#'
+
+            title = ''
+            config_type = 'configuration'
+            contributions = []
+            component_url = ''
+
+            for desc in root.findall(f'{{{ns_rdf}}}Description') + [root]:
+                about = desc.get(f'{{{ns_rdf}}}about', '')
+
+                title_el = desc.find(f'{{{ns_dc}}}title')
+                if title_el is not None and title_el.text:
+                    title = title_el.text.strip()
+
+                # Determine type (stream vs baseline)
+                for type_el in desc.findall(f'{{{ns_rdf}}}type'):
+                    type_uri = type_el.get(f'{{{ns_rdf}}}resource', '')
+                    if 'Stream' in type_uri:
+                        config_type = 'stream'
+                    elif 'Baseline' in type_uri:
+                        config_type = 'baseline'
+
+                # Get component
+                comp_el = desc.find(f'{{{ns_config}}}component')
+                if comp_el is not None:
+                    component_url = comp_el.get(f'{{{ns_rdf}}}resource', '')
+
+                # Get contributions (local configs from DNG/EWM/ETM)
+                for contrib in desc.findall(f'{{{ns_config}}}contribution'):
+                    contrib_url = contrib.get(f'{{{ns_rdf}}}resource', '')
+                    if contrib_url:
+                        # Determine which app this contribution is from
+                        app = 'unknown'
+                        if '/rm/' in contrib_url:
+                            app = 'DNG'
+                        elif '/ccm/' in contrib_url:
+                            app = 'EWM'
+                        elif '/qm/' in contrib_url:
+                            app = 'ETM'
+                        contributions.append({'url': contrib_url, 'app': app})
+
+            return {
+                'title': title,
+                'url': config_url,
+                'type': config_type,
+                'component': component_url,
+                'contributions': contributions,
+            }
+        except Exception:
+            return None
 
     # ── Export ─────────────────────────────────────────────────
 

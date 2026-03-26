@@ -4,24 +4,27 @@ IBM ELM MCP Server for IBM Bob
 Provides tools for Bob to interact with IBM Engineering Lifecycle Management (ELM)
 Covers DNG (requirements), EWM (work items), and ETM (test management)
 
-Tools (17):
-  1.  connect_to_elm          - Connect with credentials
-  2.  list_projects           - List DNG/EWM/ETM projects (domain parameter)
-  3.  get_modules             - Get modules from a DNG project
-  4.  get_module_requirements - Get requirements from a module
-  5.  save_requirements       - Save requirements to a file (JSON/CSV/Markdown)
-  6.  search_requirements     - Full-text search across all artifacts in a project
-  7.  get_artifact_types      - Discover artifact types for a DNG project
-  8.  get_link_types          - Discover link types for a DNG project
-  9.  create_requirements     - Create requirements with links in a descriptive folder
-  10. update_requirement      - Update an existing requirement's title and/or content
-  11. create_baseline         - Create a baseline snapshot of a DNG project
-  12. list_baselines          - List existing baselines for a DNG project
-  13. compare_baselines       - Compare baseline vs current stream (shows diff)
-  14. extract_pdf             - Extract text from a PDF file for import into DNG
-  15. create_task             - Create an EWM Task with optional DNG requirement link
-  16. create_test_case        - Create an ETM Test Case with optional DNG requirement link
-  17. create_test_result      - Create an ETM Test Result (pass/fail) for a test case
+Tools (20):
+  1.  connect_to_elm              - Connect with credentials
+  2.  list_projects               - List DNG/EWM/ETM projects (domain parameter)
+  3.  get_modules                 - Get modules from a DNG project
+  4.  get_module_requirements     - Get requirements from a module
+  5.  save_requirements           - Save requirements to a file (JSON/CSV/Markdown)
+  6.  search_requirements         - Full-text search across all artifacts in a project
+  7.  get_artifact_types          - Discover artifact types for a DNG project
+  8.  get_link_types              - Discover link types for a DNG project
+  9.  create_requirements         - Create requirements with links in a descriptive folder
+  10. update_requirement          - Update an existing requirement's title and/or content
+  11. create_baseline             - Create a baseline snapshot of a DNG project
+  12. list_baselines              - List existing baselines for a DNG project
+  13. compare_baselines           - Compare baseline vs current stream (shows diff)
+  14. extract_pdf                 - Extract text from a PDF file for import into DNG
+  15. create_task                 - Create an EWM Task with optional DNG requirement link
+  16. create_test_case            - Create an ETM Test Case with optional DNG requirement link
+  17. create_test_result          - Create an ETM Test Result (pass/fail) for a test case
+  18. list_global_configurations  - List all global configs (streams/baselines) from GCM
+  19. list_global_components      - List all components across DNG/EWM/ETM from GCM
+  20. get_global_config_details   - Get details + contributions for a global configuration
 """
 
 import os
@@ -520,6 +523,50 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["etm_project", "test_case_url", "status"]
+            }
+        ),
+        Tool(
+            name="list_global_configurations",
+            description=(
+                "List all global configurations from GCM (Global Configuration Management). "
+                "Shows streams and baselines that span across DNG, EWM, and ETM. "
+                "These are the top-level configurations that tie together components from all ELM apps."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="list_global_components",
+            description=(
+                "List all components registered in GCM across DNG, EWM, and ETM. "
+                "Shows every component in the ELM deployment with its project area and configuration URLs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_global_config_details",
+            description=(
+                "Get details for a specific global configuration from GCM. "
+                "Shows the configuration type (stream/baseline), component, and which "
+                "DNG/EWM/ETM local configurations contribute to it. "
+                "Use list_global_configurations first to get config URLs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "config_url": {
+                        "type": "string",
+                        "description": "URL of the global configuration (from list_global_configurations)"
+                    }
+                },
+                "required": ["config_url"]
             }
         ),
     ]
@@ -1437,6 +1484,84 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"{error_detail}\n\n"
                     "This may be a permissions issue — try a different ETM project."
                 ))]
+
+        # ── list_global_configurations (GCM) ─────────────────
+        elif name == "list_global_configurations":
+            configs = client.list_global_configurations()
+            if not configs:
+                return [TextContent(type="text", text=(
+                    "No global configurations found. "
+                    "GCM may not be configured on this server."
+                ))]
+
+            lines = [
+                f"# Global Configurations ({len(configs)} total)\n",
+                "These span across DNG, EWM, and ETM:\n",
+            ]
+            for i, c in enumerate(configs, 1):
+                lines.append(f"{i}. **{c['title']}**")
+                lines.append(f"   - URL: `{c['url']}`")
+
+            lines.append(
+                "\nUse `get_global_config_details` with a config URL "
+                "to see which DNG/EWM/ETM components contribute to it."
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ── list_global_components (GCM) ──────────────────────
+        elif name == "list_global_components":
+            components = client.list_global_components()
+            if not components:
+                return [TextContent(type="text", text=(
+                    "No global components found. "
+                    "GCM may not be configured on this server."
+                ))]
+
+            lines = [
+                f"# Global Components ({len(components)} total)\n",
+                "Components across all ELM apps:\n",
+            ]
+            for i, c in enumerate(components, 1):
+                lines.append(f"{i}. **{c['title']}**")
+                if c.get('url'):
+                    lines.append(f"   - URL: `{c['url']}`")
+                if c.get('configurations_url'):
+                    lines.append(f"   - Configurations: `{c['configurations_url']}`")
+                if c.get('created'):
+                    lines.append(f"   - Created: {c['created']}")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ── get_global_config_details (GCM) ───────────────────
+        elif name == "get_global_config_details":
+            config_url = arguments.get("config_url", "")
+            if not config_url:
+                return [TextContent(type="text", text="Error: config_url is required.")]
+
+            details = client.get_global_config_details(config_url)
+            if not details:
+                return [TextContent(type="text", text=(
+                    f"Could not retrieve details for configuration: {config_url}"
+                ))]
+
+            lines = [
+                f"# Global Configuration Details\n",
+                f"- **Title:** {details['title']}",
+                f"- **Type:** {details['type']}",
+                f"- **URL:** `{details['url']}`",
+            ]
+            if details.get('component'):
+                lines.append(f"- **Component:** `{details['component']}`")
+
+            contribs = details.get('contributions', [])
+            if contribs:
+                lines.append(f"\n### Contributions ({len(contribs)})\n")
+                for c in contribs:
+                    lines.append(f"- [{c['app']}] `{c['url']}`")
+            else:
+                lines.append("\nNo contributions found (this may be a simple configuration).")
+
+            return [TextContent(type="text", text="\n".join(lines))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

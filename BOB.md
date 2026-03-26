@@ -340,6 +340,14 @@ Only proceed after the user explicitly confirms. If ALL requirements ARE Approve
 | `create_test_case` | Create an ETM Test Case | etm_project, title, description (optional), requirement_url (optional) |
 | `create_test_result` | Record a test result (pass/fail) | etm_project, test_case_url, status, title (optional) |
 
+### GCM (Global Configuration Management)
+
+| Tool | What it does | Parameters |
+|------|-------------|------------|
+| `list_global_configurations` | List all global configs (streams/baselines) across ELM | none |
+| `list_global_components` | List all components across DNG/EWM/ETM | none |
+| `get_global_config_details` | Get details + contributions for a global config | config_url |
+
 ## Important Rules
 
 - Do NOT write Python code to interact with ELM. Use the MCP tools only.

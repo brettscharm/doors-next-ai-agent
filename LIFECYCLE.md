@@ -207,6 +207,9 @@ Every artifact is:
 | Cross-tool link: Test Case → Requirement | ETM | `create_test_case` | ✅ |
 | Create Test Results (pass/fail) | ETM | `create_test_result` | ✅ |
 | Create Stories/Defects | EWM | — | 🔧 Skipped |
+| List global configurations | GCM | `list_global_configurations` | ✅ |
+| List global components | GCM | `list_global_components` | ✅ |
+| Get global config details | GCM | `get_global_config_details` | ✅ |
 
 ---
 
