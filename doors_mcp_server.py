@@ -28,10 +28,25 @@ Tools (20):
 """
 
 import os
+import sys
+import logging
 import asyncio
 from typing import Any, Optional, List, Dict
+
+# MCP stdio servers must log to stderr, never stdout
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("doors-next")
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import (
+    Tool, TextContent,
+    Resource, ResourceTemplate, BlobResourceContents, TextResourceContents,
+    Prompt, PromptMessage, PromptArgument,
+)
 import mcp.server.stdio
 from dotenv import load_dotenv
 from doors_client import DOORSNextClient
@@ -52,9 +67,15 @@ _last_project_name: str = ""
 _folder_cache: Dict[str, Dict] = {}           # folder_name -> {title, url}
 
 
+_client_error: str = ""
+
+
 def _get_or_create_client() -> Optional[DOORSNextClient]:
-    """Get existing client or try to create one from .env"""
-    global _client
+    """Get existing client or try to create one from .env.
+
+    Sets _client_error with the reason if connection fails.
+    """
+    global _client, _client_error
     if _client is not None:
         return _client
 
@@ -62,12 +83,31 @@ def _get_or_create_client() -> Optional[DOORSNextClient]:
     username = os.getenv("DOORS_USERNAME")
     password = os.getenv("DOORS_PASSWORD")
 
-    if all([base_url, username, password]):
-        client = DOORSNextClient(base_url, username, password)
-        if client.authenticate():
-            _client = client
-            return _client
+    if not all([base_url, username, password]):
+        missing = []
+        if not base_url:
+            missing.append("DOORS_URL")
+        if not username:
+            missing.append("DOORS_USERNAME")
+        if not password:
+            missing.append("DOORS_PASSWORD")
+        _client_error = f"Missing .env variables: {', '.join(missing)}"
+        return None
 
+    # Normalize URL — ensure it ends with /rm
+    base_url = base_url.strip().rstrip('/')
+    if not base_url.endswith('/rm'):
+        base_url = f"{base_url}/rm"
+
+    client = DOORSNextClient(base_url, username, password)
+    auth_result = client.authenticate()
+    if auth_result['success']:
+        _client = client
+        _client_error = ""
+        return _client
+
+    _client_error = auth_result['error']
+    logger.warning("Auto-connect from .env failed: %s", _client_error)
     return None
 
 
@@ -88,6 +128,350 @@ def _find_by_identifier(items: List[Dict], identifier: str, key: str = 'title') 
             return item
 
     return None
+
+
+# ── Prompts ───────────────────────────────────────────────────
+
+@app.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    return [
+        Prompt(
+            name="generate-requirements",
+            description=(
+                "Generate IEEE 29148-compliant requirements for a system or feature. "
+                "Walks through a structured interview, generates requirements with "
+                "measurable acceptance criteria, and pushes to DNG."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="system_description",
+                    description="What system or feature are these requirements for?",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="requirement_type",
+                    description="Type of requirements: stakeholder, system, software, hardware, security, performance",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="standards",
+                    description="Applicable standards or regulations (e.g., DO-178C, ISO 26262, MIL-STD-882)",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="count",
+                    description="How many requirements: 'few' (5-10) or 'comprehensive' (20+)",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
+            name="full-lifecycle",
+            description=(
+                "Create a complete lifecycle: Requirements in DNG -> Tasks in EWM -> "
+                "Test Cases in ETM, all cross-linked for full traceability."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="system_description",
+                    description="What system or feature to build the lifecycle for?",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="dng_project",
+                    description="DNG project name or number for requirements",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="ewm_project",
+                    description="EWM project name or number for tasks",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="etm_project",
+                    description="ETM project name or number for test cases",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
+            name="import-pdf",
+            description=(
+                "Import a PDF document into DNG as structured requirements. "
+                "Extracts text, parses into requirements, previews, and pushes to DNG. "
+                "Supports re-import with diff detection for updated PDFs."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="file_path",
+                    description="Absolute path to the PDF file",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="project",
+                    description="DNG project name or number",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
+            name="review-requirements",
+            description=(
+                "Read requirements from a DNG module and review them for quality: "
+                "checks for ambiguity, missing acceptance criteria, testability, "
+                "and IEEE 29148 compliance."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="project",
+                    description="DNG project name or number",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="module",
+                    description="Module name or number to review",
+                    required=True,
+                ),
+            ],
+        ),
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMessage]:
+    args = arguments or {}
+
+    if name == "generate-requirements":
+        system_desc = args.get("system_description", "")
+        req_type = args.get("requirement_type", "system")
+        standards = args.get("standards", "")
+        count = args.get("count", "10-15")
+
+        standards_note = f"\n\nApplicable standards: {standards}. Include compliance references in each requirement." if standards else ""
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"Generate {req_type} requirements for the following system:\n\n"
+                f"{system_desc}\n\n"
+                f"Target count: {count} requirements.{standards_note}\n\n"
+                f"Follow IEEE 29148 / INCOSE best practices:\n"
+                f"- Use 'shall' for mandatory behavior\n"
+                f"- Each requirement must be atomic and testable\n"
+                f"- Include measurable acceptance criteria (numeric thresholds, time limits)\n"
+                f"- Group under Heading artifacts by functional area\n"
+                f"- Specify condition -> action -> expected result\n\n"
+                f"First connect to ELM (if not connected), then:\n"
+                f"1. Call get_artifact_types to get valid type names\n"
+                f"2. Generate the requirements following the rules above\n"
+                f"3. Present in a preview table with Type, Title, and Acceptance Criteria columns\n"
+                f"4. Wait for my approval before pushing to DNG"
+            )),
+        )]
+
+    elif name == "full-lifecycle":
+        system_desc = args.get("system_description", "")
+        dng = args.get("dng_project", "")
+        ewm = args.get("ewm_project", "")
+        etm = args.get("etm_project", "")
+
+        project_notes = ""
+        if dng:
+            project_notes += f"\nDNG project: {dng}"
+        if ewm:
+            project_notes += f"\nEWM project: {ewm}"
+        if etm:
+            project_notes += f"\nETM project: {etm}"
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"Create a full engineering lifecycle for:\n\n{system_desc}\n"
+                f"{project_notes}\n\n"
+                f"Phase 1: Generate requirements in DNG (IEEE 29148 compliant, with acceptance criteria)\n"
+                f"Phase 2: Create implementation tasks in EWM linked to requirements\n"
+                f"Phase 3: Create test cases in ETM linked to requirements (with preconditions, steps, pass/fail criteria)\n\n"
+                f"At each phase:\n"
+                f"- Preview what will be created in a table\n"
+                f"- Wait for my approval before pushing\n"
+                f"- Use the requirement URLs from Phase 1 for cross-linking in Phases 2 and 3"
+            )),
+        )]
+
+    elif name == "import-pdf":
+        file_path = args.get("file_path", "")
+        project = args.get("project", "")
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"Import this PDF into DNG as structured requirements:\n\n"
+                f"File: {file_path}\n"
+                f"{'Project: ' + project if project else 'Ask me which project to use.'}\n\n"
+                f"Steps:\n"
+                f"1. Call extract_pdf to get the text\n"
+                f"2. Parse into structured requirements (identify headings, sections, individual requirements)\n"
+                f"3. Call get_artifact_types to get valid type names\n"
+                f"4. Present in a preview table\n"
+                f"5. Wait for my approval before pushing to DNG\n"
+                f"6. After creation, offer to create a baseline snapshot"
+            )),
+        )]
+
+    elif name == "review-requirements":
+        project = args.get("project", "")
+        module = args.get("module", "")
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"Review the requirements in project '{project}', module '{module}' for quality.\n\n"
+                f"1. Call get_module_requirements to read all requirements\n"
+                f"2. Analyze each requirement against IEEE 29148 criteria:\n"
+                f"   - Uses 'shall' for mandatory behavior?\n"
+                f"   - Atomic (one testable behavior)?\n"
+                f"   - Has measurable acceptance criteria?\n"
+                f"   - Unambiguous (no vague terms like 'fast', 'reliable')?\n"
+                f"   - Verifiable and testable?\n"
+                f"3. Present a quality report:\n"
+                f"   - Overall score (% compliant)\n"
+                f"   - Table of issues found per requirement\n"
+                f"   - Suggested rewrites for non-compliant requirements\n"
+                f"4. Ask if I want to update the non-compliant requirements in DNG"
+            )),
+        )]
+
+    raise ValueError(f"Unknown prompt: {name}")
+
+
+# ── Resources ────────────────────────────────────────────────
+
+@app.list_resource_templates()
+async def list_resource_templates() -> list[ResourceTemplate]:
+    return [
+        ResourceTemplate(
+            uriTemplate="elm://projects/{domain}",
+            name="elm-projects",
+            description="List all projects in an ELM domain (dng, ewm, or etm)",
+            mimeType="application/json",
+        ),
+        ResourceTemplate(
+            uriTemplate="elm://project/{project_name}/modules",
+            name="elm-modules",
+            description="List modules in a DNG project",
+            mimeType="application/json",
+        ),
+        ResourceTemplate(
+            uriTemplate="elm://project/{project_name}/module/{module_name}/requirements",
+            name="elm-requirements",
+            description="Get all requirements from a specific module",
+            mimeType="application/json",
+        ),
+    ]
+
+
+@app.list_resources()
+async def list_resources() -> list[Resource]:
+    """List static resources — connected project info if available."""
+    resources = []
+    client = _get_or_create_client()
+    if client and _projects_cache:
+        resources.append(Resource(
+            uri="elm://connection/status",
+            name="ELM Connection Status",
+            description=f"Connected to {client.base_url} with {len(_projects_cache)} DNG projects",
+            mimeType="application/json",
+        ))
+    return resources
+
+
+@app.read_resource()
+async def read_resource(uri: str) -> str:
+    import json as _json
+
+    # elm://connection/status
+    if uri == "elm://connection/status":
+        client = _get_or_create_client()
+        if client:
+            return _json.dumps({
+                "connected": True,
+                "server": client.base_url,
+                "dng_projects": len(_projects_cache),
+                "ewm_projects": len(_ewm_projects_cache),
+                "etm_projects": len(_etm_projects_cache),
+            }, indent=2)
+        return _json.dumps({"connected": False, "error": _client_error})
+
+    # elm://projects/{domain}
+    if uri.startswith("elm://projects/"):
+        domain = uri.split("/")[-1]
+        client = _get_or_create_client()
+        if not client:
+            return _json.dumps({"error": "Not connected to ELM"})
+
+        if domain == "ewm":
+            projects = client.list_ewm_projects()
+        elif domain == "etm":
+            projects = client.list_etm_projects()
+        else:
+            projects = client.list_projects()
+
+        return _json.dumps([{"title": p["title"], "id": p.get("id", "")} for p in projects], indent=2)
+
+    # elm://project/{name}/modules
+    if "/modules" in uri and uri.startswith("elm://project/"):
+        parts = uri.replace("elm://project/", "").split("/")
+        project_name = parts[0]
+        client = _get_or_create_client()
+        if not client:
+            return _json.dumps({"error": "Not connected to ELM"})
+
+        if not _projects_cache:
+            _projects_cache.extend(client.list_projects())
+
+        project = _find_by_identifier(_projects_cache, project_name)
+        if not project:
+            return _json.dumps({"error": f"Project not found: {project_name}"})
+
+        modules = client.get_modules(project["url"])
+        return _json.dumps([{"title": m["title"], "id": m.get("id", "")} for m in modules], indent=2)
+
+    # elm://project/{name}/module/{module}/requirements
+    if "/requirements" in uri and "/module/" in uri:
+        parts = uri.replace("elm://project/", "").split("/")
+        # parts: [project_name, "module", module_name, "requirements"]
+        project_name = parts[0]
+        module_name = parts[2] if len(parts) > 2 else ""
+        client = _get_or_create_client()
+        if not client:
+            return _json.dumps({"error": "Not connected to ELM"})
+
+        if not _projects_cache:
+            _projects_cache.extend(client.list_projects())
+
+        project = _find_by_identifier(_projects_cache, project_name)
+        if not project:
+            return _json.dumps({"error": f"Project not found: {project_name}"})
+
+        project_key = project["id"]
+        if project_key not in _modules_cache:
+            _modules_cache[project_key] = client.get_modules(project["url"])
+
+        modules = _modules_cache.get(project_key, [])
+        module = _find_by_identifier(modules, module_name)
+        if not module:
+            return _json.dumps({"error": f"Module not found: {module_name}"})
+
+        reqs = client.get_module_requirements(module["url"])
+        return _json.dumps([{
+            "title": r.get("title", ""),
+            "id": r.get("id", ""),
+            "url": r.get("url", ""),
+            "artifact_type": r.get("artifact_type", ""),
+            "description": (r.get("description") or "")[:200],
+        } for r in reqs], indent=2)
+
+    return _json.dumps({"error": f"Unknown resource: {uri}"})
 
 
 # ── Tool Definitions ──────────────────────────────────────────
@@ -580,6 +964,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global _modules_cache, _last_requirements, _last_module_name, _last_project_name
     global _folder_cache
 
+    logger.info("Tool called: %s", name)
+
     try:
         # ── connect_to_elm ────────────────────────────────────
         if name == "connect_to_elm":
@@ -590,14 +976,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if not all([url, username, password]):
                 return [TextContent(type="text", text="Error: url, username, and password are all required.")]
 
-            # Auto-append /rm if the user gave the base server URL
+            # Normalize URL — strip trailing slash, ensure /rm context root
+            url = url.rstrip('/')
+            # Handle cases: server.com, server.com/rm, server.com/rm/
             if not url.endswith('/rm'):
+                # Strip other context roots if user accidentally included them
+                for suffix in ['/ccm', '/qm', '/gc']:
+                    if url.endswith(suffix):
+                        url = url[:-len(suffix)]
+                        break
                 url = f"{url}/rm"
 
             client = DOORSNextClient(url, username, password)
-            if not client.authenticate():
+            auth_result = client.authenticate()
+            if not auth_result['success']:
                 return [TextContent(type="text", text=(
-                    "Failed to connect. Please check:\n"
+                    f"Failed to connect: {auth_result['error']}\n\n"
+                    "Please check:\n"
                     "- URL is correct (e.g., https://your-server.com)\n"
                     "- Username and password are correct\n"
                     "- The server is reachable from this machine"
@@ -624,6 +1019,91 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"- **Full Lifecycle** — Requirements → Tasks → Test Cases, all cross-linked.\n\n"
                 f"Which project would you like to work with?"
             ))]
+
+        # ── extract_pdf (no connection needed) ────────────────
+        if name == "extract_pdf":
+            file_path = arguments.get("file_path", "").strip()
+            if not file_path:
+                return [TextContent(type="text", text="Error: file_path is required.")]
+
+            import os
+            if not os.path.exists(file_path):
+                return [TextContent(type="text", text=f"Error: File not found: {file_path}")]
+
+            try:
+                import fitz  # PyMuPDF
+            except ImportError:
+                return [TextContent(type="text", text=(
+                    "Error: PyMuPDF is not installed. Run: pip install PyMuPDF"
+                ))]
+
+            try:
+                doc = fitz.open(file_path)
+                pages = []
+                for i, page in enumerate(doc, 1):
+                    text = page.get_text().strip()
+                    if text:
+                        pages.append(f"--- Page {i} ---\n{text}")
+                doc.close()
+
+                if not pages:
+                    return [TextContent(type="text", text=(
+                        f"No text found in '{os.path.basename(file_path)}'. "
+                        "The PDF may be image-only (scanned without OCR)."
+                    ))]
+
+                full_text = "\n\n".join(pages)
+                return [TextContent(type="text", text=(
+                    f"# PDF Extracted: {os.path.basename(file_path)}\n"
+                    f"**Pages:** {len(pages)}\n\n"
+                    f"{full_text}"
+                ))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error reading PDF: {e}")]
+
+        # ── All other tools require a connection ──────────────
+        client = _get_or_create_client()
+        if client is None:
+            error_detail = f"\nReason: {_client_error}" if _client_error else ""
+            return [TextContent(type="text", text=(
+                f"Not connected to ELM.{error_detail}\n\n"
+                "Use the `connect_to_elm` tool with your server URL, username, and password."
+            ))]
+
+        # ── list_projects ─────────────────────────────────────
+        if name == "list_projects":
+            domain = arguments.get("domain", "dng").lower()
+
+            if domain == "ewm":
+                if not _ewm_projects_cache:
+                    _ewm_projects_cache = client.list_ewm_projects()
+                projects = _ewm_projects_cache
+                label = "EWM (Engineering Workflow Management)"
+                hint = "Use `create_task` with an EWM project number or name."
+            elif domain == "etm":
+                if not _etm_projects_cache:
+                    _etm_projects_cache = client.list_etm_projects()
+                projects = _etm_projects_cache
+                label = "ETM (Engineering Test Management)"
+                hint = "Use `create_test_case` with an ETM project number or name."
+            else:
+                if not _projects_cache:
+                    _projects_cache = client.list_projects()
+                projects = _projects_cache
+                label = "DNG (DOORS Next Generation)"
+                hint = "Use `get_modules` with a project number or name to see its modules."
+
+            if not projects:
+                return [TextContent(type="text", text=(
+                    f"No {domain.upper()} projects found. Check your permissions or server URL."
+                ))]
+
+            lines = [f"# {label} Projects ({len(projects)} total)\n"]
+            for i, p in enumerate(projects, 1):
+                lines.append(f"{i}. **{p['title']}**")
+
+            lines.append(f"\n{hint}")
+            return [TextContent(type="text", text="\n".join(lines))]
 
         # ── compare_baselines (DNG CM) ────────────────────────
         elif name == "compare_baselines":
@@ -680,7 +1160,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif in_current and in_baseline:
                     cur = current_map[title]
                     bl = baseline_map[title]
-                    # Compare descriptions
                     cur_desc = (cur.get('description') or '').strip()
                     bl_desc = (bl.get('description') or '').strip()
                     if cur_desc != bl_desc:
@@ -722,90 +1201,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             lines.append(f"\n**Summary:** {len(changed)} modified, {len(added)} added, {len(removed)} removed, {len(unchanged)} unchanged")
 
-            return [TextContent(type="text", text="\n".join(lines))]
-
-        # ── extract_pdf (no connection needed) ────────────────
-        if name == "extract_pdf":
-            file_path = arguments.get("file_path", "").strip()
-            if not file_path:
-                return [TextContent(type="text", text="Error: file_path is required.")]
-
-            import os
-            if not os.path.exists(file_path):
-                return [TextContent(type="text", text=f"Error: File not found: {file_path}")]
-
-            try:
-                import fitz  # PyMuPDF
-            except ImportError:
-                return [TextContent(type="text", text=(
-                    "Error: PyMuPDF is not installed. Run: pip install PyMuPDF"
-                ))]
-
-            try:
-                doc = fitz.open(file_path)
-                pages = []
-                for i, page in enumerate(doc, 1):
-                    text = page.get_text().strip()
-                    if text:
-                        pages.append(f"--- Page {i} ---\n{text}")
-                doc.close()
-
-                if not pages:
-                    return [TextContent(type="text", text=(
-                        f"No text found in '{os.path.basename(file_path)}'. "
-                        "The PDF may be image-only (scanned without OCR)."
-                    ))]
-
-                full_text = "\n\n".join(pages)
-                return [TextContent(type="text", text=(
-                    f"# PDF Extracted: {os.path.basename(file_path)}\n"
-                    f"**Pages:** {len(pages)}\n\n"
-                    f"{full_text}"
-                ))]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error reading PDF: {e}")]
-
-        # ── All other tools require a connection ──────────────
-        client = _get_or_create_client()
-        if client is None:
-            return [TextContent(type="text", text=(
-                "Not connected to ELM.\n\n"
-                "Use the `connect_to_elm` tool with your server URL, username, and password."
-            ))]
-
-        # ── list_projects ─────────────────────────────────────
-        if name == "list_projects":
-            domain = arguments.get("domain", "dng").lower()
-
-            if domain == "ewm":
-                if not _ewm_projects_cache:
-                    _ewm_projects_cache = client.list_ewm_projects()
-                projects = _ewm_projects_cache
-                label = "EWM (Engineering Workflow Management)"
-                hint = "Use `create_task` with an EWM project number or name."
-            elif domain == "etm":
-                if not _etm_projects_cache:
-                    _etm_projects_cache = client.list_etm_projects()
-                projects = _etm_projects_cache
-                label = "ETM (Engineering Test Management)"
-                hint = "Use `create_test_case` with an ETM project number or name."
-            else:
-                if not _projects_cache:
-                    _projects_cache = client.list_projects()
-                projects = _projects_cache
-                label = "DNG (DOORS Next Generation)"
-                hint = "Use `get_modules` with a project number or name to see its modules."
-
-            if not projects:
-                return [TextContent(type="text", text=(
-                    f"No {domain.upper()} projects found. Check your permissions or server URL."
-                ))]
-
-            lines = [f"# {label} Projects ({len(projects)} total)\n"]
-            for i, p in enumerate(projects, 1):
-                lines.append(f"{i}. **{p['title']}**")
-
-            lines.append(f"\n{hint}")
             return [TextContent(type="text", text="\n".join(lines))]
 
         # ── get_modules ───────────────────────────────────────
@@ -1118,7 +1513,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "Check your permissions."
                 ))]
 
-            # Find or create the named folder (check cache first)
+            # Create a module for these requirements
+            module_result = client.create_module(
+                project_url=project['url'],
+                title=folder_name,
+                description=f"Requirements generated by AI agent",
+            )
+            module_url = None
+            if module_result and 'error' not in module_result:
+                module_url = module_result['url']
+
+            # Also create a folder to hold the core artifacts
             folder = _folder_cache.get(folder_name)
             if not folder:
                 folder = client.find_folder(project['url'], folder_name)
@@ -1129,7 +1534,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                         f"Failed to create '{folder_name}' folder. "
                         "Check your write permissions for this project."
                     ))]
-            # Cache for subsequent calls in the same session
             _folder_cache[folder_name] = folder
 
             folder_url = folder['url']
@@ -1194,9 +1598,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Build response
             lines = [
                 f"# Requirements Created in '{project['title']}'\n",
-                f"Folder: **{folder_name}**\n",
-                f"Created **{len(created)}** of {len(reqs_data)} requirement(s):\n",
             ]
+
+            if module_url:
+                lines.append(f"Module: **[AI Generated] {folder_name}**")
+            lines.append(f"Folder: **{folder_name}**\n")
+            lines.append(f"Created **{len(created)}** of {len(reqs_data)} requirement(s):\n")
 
             for i, r in enumerate(created, 1):
                 lines.append(f"{i}. {r['title']}")
@@ -1208,11 +1615,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 for f_msg in failed:
                     lines.append(f"- {f_msg}")
 
-            lines.append(
-                f"\n**Next step:** Open DNG and review the requirements in the "
-                f"'{folder_name}' folder. Move approved ones into the "
-                f"appropriate module."
-            )
+            if module_url:
+                lines.append(
+                    f"\n**Next step:** Open the **[AI Generated] {folder_name}** module in DNG. "
+                    f"Add the requirements from the '{folder_name}' folder into the module — "
+                    f"select all, right-click, and choose 'Add to Module'."
+                )
+            else:
+                lines.append(
+                    f"\n**Next step:** Open DNG and review the requirements in the "
+                    f"'{folder_name}' folder. Move approved ones into the "
+                    f"appropriate module."
+                )
 
             return [TextContent(type="text", text="\n".join(lines))]
 
@@ -1568,14 +1982,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
     except Exception as e:
         import traceback
+        tb = traceback.format_exc()
+        logger.error("Tool %s failed: %s\n%s", name, e, tb)
         return [TextContent(type="text", text=(
-            f"Error in {name}: {str(e)}\n\n{traceback.format_exc()}"
+            f"Error in {name}: {str(e)}\n\n{tb}"
         ))]
 
 
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
+    logger.info("IBM ELM MCP Server starting (20 tools, 4 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

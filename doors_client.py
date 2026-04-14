@@ -40,11 +40,12 @@ class DOORSNextClient:
         'nav': 'http://jazz.net/ns/rm/navigation#',
     }
 
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, username: str, password: str, verify_ssl: bool = True):
         self.base_url = base_url.rstrip('/')
         self.username = username
         self.password = password
         self.session = requests.Session()
+        self.session.verify = verify_ssl
         self._authenticated = False
 
     @property
@@ -84,29 +85,170 @@ class DOORSNextClient:
             )
         return cls(base_url, username, password)
 
-    def authenticate(self) -> bool:
-        """Authenticate with DOORS Next using Basic Auth"""
+    def authenticate(self) -> dict:
+        """Authenticate with DOORS Next.
+
+        Tries Basic Auth first, then falls back to Jazz Form-Based Auth
+        (j_security_check) if the server uses form-based login.
+
+        Returns:
+            dict with 'success' (bool) and 'error' (str, empty on success).
+        """
+        self.session.headers.update({
+            'X-Requested-With': 'XMLHttpRequest',  # Prevents OIDC redirect
+        })
+
+        # ── Attempt 1: Basic Auth ────────────────────────────
         try:
             self.session.auth = (self.username, self.password)
-            self.session.headers.update({
-                'X-Requested-With': 'XMLHttpRequest'  # Prevents OIDC redirect
-            })
             resp = self.session.get(
                 f"{self.base_url}/rootservices",
                 timeout=self._TIMEOUT,
+                allow_redirects=True,
+            )
+        except requests.exceptions.SSLError:
+            if not self.session.verify:
+                # Already retried without SSL — give up
+                return {'success': False, 'error': f'SSL certificate error for {self.base_url}. The server certificate is not trusted.'}
+            # SSL cert issue — common with IBM Cloud demo environments
+            # Auto-retry without SSL verification
+            self.session.verify = False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            return self.authenticate()  # Retry with verify=False
+        except requests.exceptions.ConnectionError:
+            return {'success': False, 'error': f'Cannot reach server at {self.base_url}. Check the URL and network.'}
+        except requests.exceptions.Timeout:
+            return {'success': False, 'error': f'Server at {self.base_url} timed out after {self._TIMEOUT}s.'}
+        except Exception as e:
+            return {'success': False, 'error': f'Connection error: {e}'}
+
+        # Check if we got valid XML back (real rootservices, not a login page)
+        if resp.status_code == 200 and self._is_valid_rootservices(resp.text):
+            # rootservices may be public — verify auth by hitting the catalog
+            auth_check = self._verify_auth_with_catalog()
+            if auth_check is True:
+                self._authenticated = True
+                return {'success': True, 'error': ''}
+            elif auth_check is False:
+                return {'success': False, 'error': 'Invalid username or password.'}
+            # auth_check is None means catalog check was inconclusive — trust rootservices
+            self._authenticated = True
+            return {'success': True, 'error': ''}
+
+        # ── Attempt 2: Jazz Form-Based Auth ──────────────────
+        # IBM ELM often uses form-based auth via j_security_check
+        if self._needs_form_auth(resp):
+            return self._form_based_authenticate()
+
+        # ── Auth failed ──────────────────────────────────────
+        if resp.status_code == 401:
+            return {'success': False, 'error': 'Invalid username or password (HTTP 401).'}
+        elif resp.status_code == 403:
+            return {'success': False, 'error': 'Access denied (HTTP 403). Check your account permissions.'}
+        elif resp.status_code != 200:
+            return {'success': False, 'error': f'Server returned HTTP {resp.status_code}. Check the URL.'}
+        else:
+            return {'success': False, 'error': 'Server returned a login page instead of rootservices. Authentication failed.'}
+
+    def _verify_auth_with_catalog(self):
+        """Verify authentication by requesting the OSLC catalog (requires auth).
+
+        Returns:
+            True  — auth confirmed working
+            False — auth confirmed failing (401/403)
+            None  — inconclusive (catalog unavailable, network error, etc.)
+        """
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/oslc_rm/catalog",
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+                allow_redirects=True,
             )
             if resp.status_code == 200:
-                self._authenticated = True
                 return True
-            return False
+            if resp.status_code in [401, 403]:
+                return False
+            if 'j_security_check' in resp.text or 'authfailed' in resp.url.lower():
+                return False
+            return None  # Inconclusive
         except Exception:
-            return False
+            return None  # Network issue — don't block auth
+
+    def _is_valid_rootservices(self, body: str) -> bool:
+        """Check if the response body is valid rootservices XML (not a login page)."""
+        # A real rootservices response contains OSLC catalog references
+        return ('rootservices' in body.lower() or 'catalogUrl' in body or
+                'oslc_rm' in body or 'ServiceProviderCatalog' in body) and \
+               'j_security_check' not in body
+
+    def _needs_form_auth(self, resp) -> bool:
+        """Check if the server is asking for form-based authentication."""
+        body = resp.text.lower()
+        return ('j_security_check' in body or
+                'authfailed' in resp.url.lower() or
+                'form' in body and 'j_username' in body)
+
+    def _form_based_authenticate(self) -> dict:
+        """Authenticate using IBM Jazz Form-Based Auth (j_security_check)."""
+        # Clear basic auth — form auth uses cookies
+        self.session.auth = None
+
+        auth_url = f"{self._server_root}/j_security_check"
+        try:
+            resp = self.session.post(
+                auth_url,
+                data={
+                    'j_username': self.username,
+                    'j_password': self.password,
+                },
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                allow_redirects=True,
+                timeout=self._TIMEOUT,
+            )
+        except Exception as e:
+            return {'success': False, 'error': f'Form-based auth request failed: {e}'}
+
+        # Check for auth failure indicators
+        if 'authfailed' in resp.url.lower():
+            return {'success': False, 'error': 'Invalid username or password (form-based auth failed).'}
+
+        # Verify by checking the catalog (requires auth, unlike rootservices)
+        auth_check = self._verify_auth_with_catalog()
+        if auth_check is True:
+            self._authenticated = True
+            return {'success': True, 'error': ''}
+        elif auth_check is False:
+            return {'success': False, 'error': 'Form-based auth failed. Invalid username or password.'}
+
+        # Fallback: check rootservices
+        try:
+            verify = self.session.get(
+                f"{self.base_url}/rootservices",
+                timeout=self._TIMEOUT,
+            )
+            if verify.status_code == 200 and self._is_valid_rootservices(verify.text):
+                self._authenticated = True
+                return {'success': True, 'error': ''}
+        except Exception:
+            pass
+
+        return {'success': False, 'error': 'Form-based auth completed but server still not accessible. Check credentials.'}
 
     def _ensure_auth(self):
         """Ensure authenticated before making requests"""
         if not self._authenticated:
-            if not self.authenticate():
-                raise ConnectionError("Failed to authenticate with DOORS Next")
+            result = self.authenticate()
+            if not result['success']:
+                raise ConnectionError(f"Failed to authenticate: {result['error']}")
 
     def _extract_project_area_id(self, service_provider_url: str) -> str:
         """Extract project area ID from service provider URL.
@@ -158,7 +300,8 @@ class DOORSNextClient:
                              max_results: int = 20) -> List[Dict]:
         """Full-text search across all artifacts in a DNG project.
 
-        Uses the JFS Full-Text Search Service (Apache Lucene backed).
+        Uses the OSLC query capability with oslc.searchTerms (primary),
+        then falls back to JFS full-text search if OSLC returns nothing.
 
         Args:
             project_url: The project's service provider URL
@@ -169,6 +312,123 @@ class DOORSNextClient:
             List of dicts with 'title', 'url', 'summary' for matching artifacts.
         """
         self._ensure_auth()
+
+        # ── Primary: OSLC query with searchTerms ─────────────
+        results = self._search_oslc_query(project_url, query, max_results)
+        if results:
+            return results
+
+        # ── Fallback: JFS full-text search ───────────────────
+        return self._search_jfs(project_url, query, max_results)
+
+    def _search_oslc_query(self, project_url: str, query: str,
+                            max_results: int = 20) -> List[Dict]:
+        """Search using OSLC query capability (oslc.searchTerms).
+
+        DNG returns compact results (URLs only), so we fetch each resource's
+        title in a lightweight follow-up request.
+        """
+        try:
+            # Get the RequirementCollection query base from the service provider
+            resp = self.session.get(
+                project_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+
+            root = ET.fromstring(resp.content)
+            ns = self._NS_OSLC
+
+            query_base = None
+            for qc in root.findall('.//oslc:QueryCapability', ns):
+                rt_el = qc.find('oslc:resourceType', ns)
+                if rt_el is not None and 'RequirementCollection' in rt_el.get(f'{{{ns["rdf"]}}}resource', ''):
+                    qb_el = qc.find('oslc:queryBase', ns)
+                    if qb_el is not None:
+                        query_base = qb_el.get(f'{{{ns["rdf"]}}}resource', '').replace('&amp;', '&')
+                    break
+
+            if not query_base:
+                return []
+
+            # Execute the OSLC search
+            resp2 = self.session.get(
+                query_base,
+                params={
+                    'oslc.searchTerms': f'"{query}"',
+                    'oslc.pageSize': str(max_results),
+                },
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp2.status_code != 200:
+                return []
+
+            root2 = ET.fromstring(resp2.content)
+
+            # Collect resource URLs from rdfs:member elements
+            resource_urls = []
+            for member in root2.iter():
+                local = member.tag.split('}')[-1] if '}' in member.tag else member.tag
+                if local in ('Requirement', 'RequirementCollection'):
+                    about = member.get(f'{{{ns["rdf"]}}}about', '')
+                    if about and '/resources/' in about:
+                        resource_urls.append(about)
+                        if len(resource_urls) >= max_results:
+                            break
+
+            if not resource_urls:
+                return []
+
+            # Fetch title for each resource (compact representation)
+            results = []
+            for url in resource_urls:
+                try:
+                    r = self.session.get(
+                        url,
+                        headers={
+                            'Accept': 'application/rdf+xml',
+                            'OSLC-Core-Version': '2.0',
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                        timeout=15,
+                    )
+                    if r.status_code != 200:
+                        continue
+                    rroot = ET.fromstring(r.content)
+                    title = ''
+                    desc = ''
+                    for elem in rroot.iter():
+                        el_local = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                        if el_local == 'title' and elem.text and not title:
+                            title = elem.text
+                        elif el_local == 'description' and elem.text and not desc:
+                            desc = elem.text[:200]
+                    if title:
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'summary': desc,
+                        })
+                except Exception:
+                    continue
+
+            return results
+        except Exception:
+            return []
+
+    def _search_jfs(self, project_url: str, query: str,
+                     max_results: int = 20) -> List[Dict]:
+        """Fallback search using JFS full-text search endpoint."""
         project_area_id = self._extract_project_area_id(project_url)
         project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
 
@@ -190,7 +450,6 @@ class DOORSNextClient:
 
             root = ET.fromstring(resp.content)
             ns_atom = 'http://www.w3.org/2005/Atom'
-            ns_os = 'http://a9.com/-/spec/opensearch/1.1/'
 
             results = []
             for entry in root.findall(f'{{{ns_atom}}}entry'):
@@ -202,10 +461,8 @@ class DOORSNextClient:
                 href = link_el.get('href', '') if link_el is not None else ''
                 title_text = title_el.text if title_el is not None else ''
 
-                # Use the URL as fallback title if title is just a URL
                 display_title = title_text
                 if title_text.startswith('http'):
-                    # Extract a meaningful name from the URL
                     display_title = title_text.split('/')[-1]
 
                 summary_text = ''
@@ -640,6 +897,79 @@ class DOORSNextClient:
             })
 
         return reqs
+
+    # ── Write: Modules ───────────────────────────────────────
+
+    def create_module(self, project_url: str, title: str,
+                       description: str = '') -> Optional[Dict]:
+        """Create a module (RequirementCollection) in a DNG project.
+
+        Args:
+            project_url: The project's service provider URL
+            title: Module title (will be prefixed with [AI Generated])
+            description: Optional module description
+
+        Returns:
+            Dict with 'title' and 'url' of created module, or {'error': '...'} on failure.
+        """
+        self._ensure_auth()
+        project_area_id = self._extract_project_area_id(project_url)
+        project_area_url = f"{self.base_url}/process/project-areas/{project_area_id}"
+
+        # Find the Module shape
+        shapes = self.get_artifact_shapes(project_url)
+        module_shape = None
+        for s in shapes:
+            if s['name'].lower() == 'module':
+                module_shape = s['url']
+                break
+        if not module_shape:
+            return {'error': 'No Module artifact type found in this project'}
+
+        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+
+        desc_xhtml = ''
+        if description:
+            desc_xhtml = f'<p>{self._escape_xml(description)}</p>'
+
+        rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:oslc_rm="http://open-services.net/ns/rm#"
+         xmlns:oslc="http://open-services.net/ns/core#">
+  <oslc_rm:RequirementCollection>
+    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:description rdf:parseType="Literal">
+      <div xmlns="http://www.w3.org/1999/xhtml"><p><strong>[AI Generated by Bob]</strong></p>{desc_xhtml}</div>
+    </dcterms:description>
+    <oslc:instanceShape rdf:resource="{module_shape}"/>
+  </oslc_rm:RequirementCollection>
+</rdf:RDF>'''
+
+        import urllib.parse
+        encoded_pa = urllib.parse.quote(project_area_url, safe='')
+
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/requirementFactory?projectURL={encoded_pa}",
+                data=rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code == 201:
+                return {
+                    'title': prefixed_title,
+                    'url': resp.headers.get('Location', ''),
+                }
+            error_msg = self._extract_oslc_error(resp.text)
+            return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {'error': str(e)}
 
     # ── Write: Folders ────────────────────────────────────────
 

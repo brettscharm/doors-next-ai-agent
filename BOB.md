@@ -5,7 +5,7 @@ All the heavy lifting is done by the MCP tools — you do NOT need to write any 
 
 ## First-Time Setup (Do This Automatically)
 
-When a user says "connect to ELM" and the `doors-next` MCP server is NOT available yet:
+When a user says "connect to ELM" and the `doors-next` MCP server is NOT available yet, do ALL of this automatically — don't ask the user to do manual steps:
 
 1. **Install dependencies:**
    ```bash
@@ -17,25 +17,65 @@ When a user says "connect to ELM" and the `doors-next` MCP server is NOT availab
    pwd
    ```
 
-3. **Configure the MCP server** by adding it to your MCP settings file.
-   The settings file location depends on the tool:
-   - **Bob (VS Code):** Check Bob's MCP settings in VS Code
-   - **Other AI assistants:** Check the extension's MCP settings
+3. **Auto-detect the IDE and write the MCP config file directly.** Check which config file exists to determine the IDE:
 
-   Add this entry (using the real absolute path from step 2):
+   **Claude Code** (`~/.claude/settings.json` or `.claude/settings.json` in workspace):
+   - Read the existing settings file (create if missing)
+   - Add the `doors-next` entry under `mcpServers`
+   - Claude Code hot-reloads MCP config — NO restart needed
    ```json
    {
-     "doors-next": {
-       "command": "python3",
-       "args": ["doors_mcp_server.py"],
-       "cwd": "<absolute path from pwd>"
+     "mcpServers": {
+       "doors-next": {
+         "command": "python3",
+         "args": ["doors_mcp_server.py"],
+         "cwd": "<absolute path from pwd>"
+       }
      }
    }
    ```
 
-4. **Tell the user to restart VS Code** so the MCP server activates.
+   **VS Code with Bob / Copilot** (`.vscode/mcp.json` in workspace):
+   - Read or create `.vscode/mcp.json`
+   - Add the `doors-next` entry under `servers`
+   ```json
+   {
+     "servers": {
+       "doors-next": {
+         "command": "python3",
+         "args": ["doors_mcp_server.py"],
+         "cwd": "<absolute path from pwd>"
+       }
+     }
+   }
+   ```
 
-5. After restart, proceed to the workflow below.
+   **Cursor** (`.cursor/mcp.json` in workspace):
+   - Read or create `.cursor/mcp.json`
+   - Add the `doors-next` entry
+   ```json
+   {
+     "mcpServers": {
+       "doors-next": {
+         "command": "python3",
+         "args": ["doors_mcp_server.py"],
+         "cwd": "<absolute path from pwd>"
+       }
+     }
+   }
+   ```
+
+   **Windsurf** (`~/.codeium/windsurf/mcp_config.json`):
+   - Read or create the config file
+   - Add the `doors-next` entry under `mcpServers`
+
+   If you can't determine the IDE, write `.vscode/mcp.json` as the default (most common).
+
+4. **Check if a restart is needed:**
+   - Claude Code: NO restart needed — just wait a few seconds and try `list_projects`
+   - VS Code / Cursor / Windsurf: Tell the user to **reload the window** (Cmd+Shift+P → "Reload Window") — this is faster than a full restart
+
+5. After the MCP server is available, proceed to the workflow below.
 
 ## Conversation Flow (Follow This Exactly)
 
@@ -43,10 +83,12 @@ When a user says "connect to ELM" and the `doors-next` MCP server is NOT availab
 
 ### Step 1: Connect
 
-Before asking for credentials, try calling `list_projects` first. If it succeeds, the connection is already established via `.env` — tell the user you're already connected and skip to Step 2. If it fails, then ask for credentials:
+**Try auto-connect first:** Call `list_projects` — if it succeeds, credentials were loaded from `.env` automatically. Tell the user you're connected and skip to Step 2.
 
-Ask the user for their ELM server **URL**, **username**, and **password**.
-Call `connect_to_elm` with those values. The tool auto-appends `/rm` if needed — just pass whatever URL the user gives you. Do NOT lecture the user about DOORS Next vs DOORS Classic or URL formats. This one connection works for DNG, EWM, and ETM — you only need to connect once.
+**If it fails:** Ask the user for their ELM server **URL**, **username**, and **password** — all three at once in a single message.
+Call `connect_to_elm` with those values. The tool auto-appends `/rm` if needed, handles both Basic Auth and Form-Based Auth (j_security_check), and normalizes the URL — just pass whatever the user gives you. Do NOT lecture the user about DOORS Next vs DOORS Classic or URL formats. This one connection works for DNG, EWM, and ETM — you only need to connect once.
+
+**If connect_to_elm fails:** The error message will tell you exactly what went wrong (bad credentials, unreachable server, etc.). Show the user the error and ask them to correct the specific issue. Do NOT guess or retry with the same values.
 
 Tell the user:
 > "Successfully connected! There are X projects. Do you want me to list them all, or do you know which one we're working with?"
@@ -81,18 +123,39 @@ Ask these questions one at a time (not all at once). Wait for each answer before
 
 1. > "What system or feature are these requirements for? Give me a brief description."
 
-2. > "What type of requirements are we writing? For example: system-level, user-facing, security, performance, etc."
+2. > "What type of requirements are we writing? For example: stakeholder, system-level, software, hardware, security, performance, etc."
 
-3. > "How many requirements are you looking for? A handful (5-10) or a more comprehensive set (20+)?"
+3. > "Are there any applicable standards, regulations, or compliance frameworks? For example: DO-178C, ISO 26262, IEC 62304, NIST 800-53, MIL-STD-882, or industry-specific standards."
 
-4. > "Is there anything specific that must be included? Any constraints, standards, or existing requirements I should be aware of?"
+4. > "How many requirements are you looking for? A handful (5-10) or a more comprehensive set (20+)?"
 
-5. > "Should these requirements link to any existing artifacts? For example, if these are system requirements that satisfy business requirements, I can create Satisfies or Elaborated By links. What link type should I use, or should I skip linking?"
+5. > "Is there anything specific that must be included? Any constraints, interfaces, environmental conditions, or existing requirements I should be aware of?"
 
-**Phase 2: Generate and preview in plain language**
+6. > "Should these requirements link to any existing artifacts? For example, if these are system requirements that satisfy stakeholder requirements, I can create Satisfies or Elaborated By links. What link type should I use, or should I skip linking?"
 
+**Phase 2: Generate using proper requirements engineering practices**
+
+When generating requirements, follow these rules from IEEE 29148 and INCOSE best practices:
+
+**Structure:**
+- Each requirement MUST use "shall" for mandatory behavior ("The system shall...")
+- Each requirement MUST be atomic — one testable behavior per requirement
+- Each requirement MUST be verifiable — include measurable acceptance criteria (numeric thresholds, time limits, conditions)
+- Each requirement MUST specify a condition → action → expected result where applicable
+- Group requirements under Heading artifacts by functional area (e.g., "Power Management", "Communications", "Safety")
+
+**Quality checks — before presenting, verify each requirement is:**
+- **Unambiguous** — only one possible interpretation (avoid "fast", "reliable", "user-friendly" without a metric)
+- **Traceable** — can link to a parent/source requirement or stakeholder need
+- **Feasible** — technically achievable (flag any that need engineering validation)
+- **Complete** — covers normal operation, error/failure modes, and boundary conditions
+- **Consistent** — no conflicts between requirements (e.g., conflicting weight/performance targets)
+
+**If a standard was specified**, include compliance references in the requirement content (e.g., "per MIL-STD-882E Section 4.3" or "in accordance with DO-178C DAL-A").
+
+**Steps:**
 1. Call `get_artifact_types` with `project_identifier` to discover what artifact types are available for this project. If the user wants links, also call `get_link_types` with `project_identifier`.
-2. Generate the requirements based on all the user's answers. Use artifact type names from the `get_artifact_types` output — do NOT guess type names.
+2. Generate the requirements following the rules above. Use artifact type names from the `get_artifact_types` output — do NOT guess type names.
 3. **Build the folder name** using this format: `AI Generated - [username] - [short summary]`
    - Example: `AI Generated - brett.scharmett - Security Requirements`
    - Use the DNG username from the connect step and a 2-4 word summary of what was requested
@@ -100,12 +163,14 @@ Ask these questions one at a time (not all at once). Wait for each answer before
 
    > Here are the **X requirements** I'd create in [project name]:
    >
+   > **Module:** [AI Generated] AI Generated - brett.scharmett - Security Requirements
    > **Folder:** AI Generated - brett.scharmett - Security Requirements
    >
-   > | # | Type | Title | Description |
-   > |---|------|-------|-------------|
+   > | # | Type | Title | Acceptance Criteria |
+   > |---|------|-------|---------------------|
    > | 1 | Heading | Power Management | Section heading for power-related requirements |
-   > | 2 | System Requirement | The system shall maintain operation during power outages for at least 4 hours | Battery backup ensures continuous operation. Acceptance: backup activates within 5 seconds of power loss. |
+   > | 2 | System Requirement | The system shall maintain operation during power outages for a minimum of 4 hours | Backup power activates within 5 seconds of primary power loss. System continues normal operation for 4 hours on backup. |
+   > | 3 | System Requirement | The system shall alert the operator when backup power drops below 20% remaining capacity | Audio and visual alert triggered at 20% threshold. Alert logged with timestamp. |
    > | ... | ... | ... | ... |
    >
    > **Want me to push these to DNG, or would you like to make changes first?**
@@ -203,17 +268,21 @@ When the user wants to create EWM tasks from requirements:
 **Phase 2: Generate and preview tasks**
 
 1. For each source requirement, generate a Task with:
-   - Title derived from the requirement
-   - Description with acceptance criteria from the requirement
+   - **Title**: actionable implementation task derived from the requirement (verb-first: "Implement...", "Design...", "Configure...")
+   - **Description** must include:
+     - **Objective**: What this task accomplishes and why
+     - **Acceptance criteria**: Copied directly from the source requirement's measurable criteria
+     - **Verification method**: How to confirm the task is done (code review, test, demo, inspection)
+     - **Dependencies**: Any prerequisite tasks or external dependencies
    - `requirement_url` set to the source requirement's URL (from `get_module_requirements` output)
 2. **Present in a clean table:**
 
    > Here are the **X tasks** I'd create in EWM project [project name]:
    >
-   > | # | Task Title | Linked Requirement | Description |
-   > |---|-----------|-------------------|-------------|
-   > | 1 | Implement power backup system | REQ-001: Power Management | Implement the battery backup subsystem... |
-   > | ... | ... | ... | ... |
+   > | # | Task Title | Linked Requirement | Acceptance Criteria | Verification |
+   > |---|-----------|-------------------|---------------------|--------------|
+   > | 1 | Implement battery backup subsystem | REQ-001: Power Management | Backup activates within 5s, sustains 4h | Integration test |
+   > | ... | ... | ... | ... | ... |
    >
    > **Each task will be linked to its source requirement. Want me to push these to EWM?**
 
@@ -236,17 +305,21 @@ When the user wants to create ETM test cases from requirements:
 **Phase 2: Generate and preview test cases**
 
 1. For each source requirement, generate a Test Case with:
-   - Title derived from the requirement (test-oriented phrasing)
-   - Description with test steps and expected results from acceptance criteria
+   - **Title**: verification-oriented phrasing ("Verify...", "Validate...", "Confirm...")
+   - **Description** must include structured test procedure:
+     - **Preconditions**: Required system state, test environment, and setup
+     - **Test Steps**: Numbered, specific, reproducible actions (not vague — include exact values, inputs, and sequences)
+     - **Expected Results**: Measurable outcomes for each step tied directly to the requirement's acceptance criteria
+     - **Pass/Fail Criteria**: Explicit conditions for pass and fail (e.g., "PASS if backup activates in <=5 seconds; FAIL if >5 seconds or no activation")
    - `requirement_url` set to the source requirement's URL (from `get_module_requirements` output)
 2. **Present in a clean table:**
 
    > Here are the **X test cases** I'd create in ETM project [project name]:
    >
-   > | # | Test Case Title | Validates Requirement | Test Steps |
-   > |---|----------------|----------------------|------------|
-   > | 1 | Verify power backup activates within 5 seconds | REQ-001: Power Management | 1. Simulate power loss 2. Verify backup engages within 5s 3. Confirm system remains operational |
-   > | ... | ... | ... | ... |
+   > | # | Test Case Title | Validates Requirement | Preconditions | Test Steps | Pass/Fail Criteria |
+   > |---|----------------|----------------------|---------------|------------|-------------------|
+   > | 1 | Verify power backup activates within 5 seconds | REQ-001: Power Management | System at normal operation, backup fully charged | 1. Remove primary power 2. Start timer 3. Observe backup activation 4. Verify system operation for 60s | PASS: backup active <=5s, system operational. FAIL: >5s or system interruption |
+   > | ... | ... | ... | ... | ... | ... |
    >
    > **Each test case will be linked to its source requirement. Want me to push these to ETM?**
 
