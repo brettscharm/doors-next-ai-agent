@@ -70,30 +70,69 @@ from doors_client import DOORSNextClient
 
 load_dotenv()
 
-# Bumped on each release. Used by the GitHub-release update check below
-# and surfaced in the connect_to_elm response so users know which version
-# they're running.
-__version__ = "0.1.0"
+# Bumped on each release. The auto-update logic below uses this to
+# decide if a newer GitHub release exists; the `connect_to_elm`
+# response also surfaces it so users always know what version they're
+# running.
+__version__ = "0.1.1"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
 
-# Update-check state — populated lazily on first tool call so we don't
-# block server startup on a network call. None means "not checked yet";
-# empty string means "checked, no update available"; non-empty means
-# "checked, here's the notice to surface to the user once".
-_update_notice: Optional[str] = None
+# ── Auto-update on server startup ─────────────────────────────
+# When Bob (or any MCP host) launches this server, we transparently
+# check GitHub for a newer release at most once per 24 hours, pull it,
+# and re-exec ourselves so the user always has the latest version
+# without remembering any commands. Fails open: any network/git
+# hiccup leaves the current version running.
+#
+# Throttle file: ~/.elm-mcp/.last-update-check (just a unix timestamp)
+# Disable knob:  ELM_MCP_AUTO_UPDATE=0 in .env or the host's env
+
+_AUTO_UPDATE_THROTTLE_SECONDS = 24 * 60 * 60  # once a day
+_update_notice: Optional[str] = None  # set by _fetch_latest_version when a
+                                       # newer version exists but we couldn't
+                                       # auto-pull (e.g. not a git checkout)
 _update_notice_shown: bool = False
 
 
-def _check_for_update() -> str:
-    """Hit the GitHub releases API and return a one-line update notice
-    if a newer version is available. Empty string otherwise. Fails silent
-    on any error so an offline user is never blocked."""
-    global _update_notice
-    if _update_notice is not None:
-        return _update_notice
-    _update_notice = ""  # default: no notice
+def _project_dir() -> str:
+    """The directory containing this script — that's the install dir
+    we manage when we self-update."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_git_managed() -> bool:
+    """True if the install dir is a git checkout we can `git pull`."""
+    return os.path.isdir(os.path.join(_project_dir(), ".git"))
+
+
+def _last_check_path() -> str:
+    return os.path.join(_project_dir(), ".last-update-check")
+
+
+def _throttle_allows_check() -> bool:
+    """Returns False if we checked GitHub within the throttle window."""
+    try:
+        import time as _t
+        with open(_last_check_path()) as f:
+            last = float(f.read().strip() or "0")
+        return (_t.time() - last) >= _AUTO_UPDATE_THROTTLE_SECONDS
+    except (OSError, ValueError):
+        return True  # never checked, or file unreadable — go ahead
+
+
+def _record_check_now() -> None:
+    try:
+        import time as _t
+        with open(_last_check_path(), "w") as f:
+            f.write(str(_t.time()))
+    except OSError:
+        pass
+
+
+def _fetch_latest_version() -> Optional[str]:
+    """Return the latest published version string, or None on failure."""
     try:
         import urllib.request, json as _json
         req = urllib.request.Request(
@@ -103,29 +142,77 @@ def _check_for_update() -> str:
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
-        latest = (data.get("tag_name") or "").lstrip("v")
-        if latest and latest != __version__:
-            _update_notice = (
-                f"\n\n> ELM MCP v{latest} is available (you're on v{__version__}). "
-                f"Update with `smithery update elm-mcp` or `git pull` in your clone."
-            )
+        return (data.get("tag_name") or "").lstrip("v") or None
     except Exception:
-        # Offline / rate-limited / repo not yet released — just stay quiet.
-        pass
-    return _update_notice
+        return None
+
+
+def _git_pull() -> bool:
+    """Hard-reset the install dir to origin/main. Returns True on success."""
+    import subprocess
+    try:
+        subprocess.run(["git", "-C", _project_dir(), "fetch", "--quiet", "origin"],
+                       check=True, timeout=15)
+        subprocess.run(["git", "-C", _project_dir(), "reset", "--hard", "--quiet",
+                        "origin/main"], check=True, timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def _re_exec() -> None:
+    """Replace the current process with a fresh copy of this script so
+    the new code takes over. Bob's stdio pipes stay attached because
+    execv keeps the same fd table."""
+    os.execvp(sys.executable, [sys.executable, os.path.abspath(__file__)])
+
+
+def _auto_update_at_startup() -> None:
+    """Called once near the top of the server, before MCP handshake.
+    Transparently auto-updates the install if a newer release exists.
+    Skips silently if disabled, throttled, offline, not a git checkout,
+    or up-to-date."""
+    global _update_notice
+    if os.environ.get("ELM_MCP_AUTO_UPDATE", "1") == "0":
+        return
+    if not _throttle_allows_check():
+        return
+    latest = _fetch_latest_version()
+    _record_check_now()
+    if not latest or latest == __version__:
+        return
+    # A newer version exists. Try to pull + re-exec.
+    if _is_git_managed() and _git_pull():
+        # Log to stderr so it surfaces in Bob's MCP output panel; then
+        # exec back into the new code. The re-exec happens before any
+        # MCP traffic so Bob sees the new version's tools/list output.
+        sys.stderr.write(
+            f"[elm-mcp] auto-updated v{__version__} -> v{latest}; restarting\n"
+        )
+        sys.stderr.flush()
+        _re_exec()
+        # _re_exec only returns on failure
+    # Couldn't auto-update (not a git checkout, e.g. installed via
+    # Smithery as a frozen bundle). Surface a notice the next time
+    # connect_to_elm runs so the user knows to update manually.
+    _update_notice = (
+        f"\n\n> ELM MCP v{latest} is available (you're on v{__version__}). "
+        f"Run: curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | bash"
+    )
 
 
 def _maybe_append_update_notice(text: str) -> str:
     """Append the update notice exactly once per session, on the first
-    tool that calls this. Avoids spamming every response."""
+    tool that calls this. Only fires when auto-update couldn't apply."""
     global _update_notice_shown
-    if _update_notice_shown:
+    if _update_notice_shown or not _update_notice:
         return text
-    notice = _check_for_update()
-    if notice:
-        _update_notice_shown = True
-        return text + notice
-    return text
+    _update_notice_shown = True
+    return text + _update_notice
+
+
+# Run the update check now, before we register tools or open stdio.
+_auto_update_at_startup()
 
 # ── Session State ─────────────────────────────────────────────
 _client: Optional[DOORSNextClient] = None
@@ -1057,6 +1144,23 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="update_elm_mcp",
+            description=(
+                "Force-check for a new version of ELM MCP and update in place if "
+                "available. Bypasses the once-per-day auto-update throttle. Use "
+                "this when the user says 'are you up to date', 'update yourself', "
+                "or 'pull the latest version'. Returns the new version number on "
+                "success and tells the user to restart their AI assistant; the "
+                "running server keeps using the OLD code until the next restart, "
+                "by design (we don't yank the rug mid-conversation)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
             name="generate_chart",
             description=(
                 "Generate a chart (bar, horizontal bar, pie, or line) from data and save it as a PNG. "
@@ -1488,6 +1592,41 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"Which project would you like to work with?"
             )
             return [TextContent(type="text", text=_maybe_append_update_notice(body))]
+
+        # ── update_elm_mcp (no ELM connection needed) ─────────
+        if name == "update_elm_mcp":
+            latest = _fetch_latest_version()
+            if not latest:
+                return [TextContent(type="text", text=(
+                    f"Couldn't reach GitHub to check for updates. "
+                    f"You're on **v{__version__}**.\n\n"
+                    f"Try again in a moment, or update manually:\n"
+                    f"`curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | bash`"
+                ))]
+            if latest == __version__:
+                return [TextContent(type="text", text=(
+                    f"Already on the latest version: **v{__version__}**. "
+                    f"Nothing to do."
+                ))]
+            if not _is_git_managed():
+                return [TextContent(type="text", text=(
+                    f"**v{latest}** is available (you're on v{__version__}), but this "
+                    f"install isn't a git checkout so I can't pull in place. Update with:\n\n"
+                    f"`curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | bash`"
+                ))]
+            if _git_pull():
+                _record_check_now()
+                return [TextContent(type="text", text=(
+                    f"✓ Pulled **v{latest}** (was v{__version__}).\n\n"
+                    f"**Restart your AI assistant** (Bob / Claude Code / etc.) to "
+                    f"start using the new version. The currently-running server "
+                    f"keeps using v{__version__} until restart — that's deliberate "
+                    f"so we don't yank the rug mid-conversation."
+                ))]
+            return [TextContent(type="text", text=(
+                f"v{latest} is available but `git pull` failed. "
+                f"Run manually: `cd {_project_dir()} && git pull && python3 setup.py`"
+            ))]
 
         # ── extract_pdf (no connection needed) ────────────────
         if name == "extract_pdf":
