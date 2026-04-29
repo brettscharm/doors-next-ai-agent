@@ -912,8 +912,7 @@ class DOORSNextClient:
 
         Args:
             project_url: The project's service provider URL
-            title: Module title (will be prefixed with [AI Generated])
-            description: Optional module description
+            title: Module title            description: Optional module description
 
         Returns:
             Dict with 'title' and 'url' of created module, or {'error': '...'} on failure.
@@ -932,11 +931,11 @@ class DOORSNextClient:
         if not module_shape:
             return {'error': 'No Module artifact type found in this project'}
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+        clean_title = title.strip()
 
         desc_xhtml = ''
         if description:
-            desc_xhtml = f'<p>{self._escape_xml(description)}</p>'
+            desc_xhtml = f'<div xmlns="http://www.w3.org/1999/xhtml"><p>{self._escape_xml(description)}</p></div>'
 
         rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
@@ -944,10 +943,8 @@ class DOORSNextClient:
          xmlns:oslc_rm="http://open-services.net/ns/rm#"
          xmlns:oslc="http://open-services.net/ns/core#">
   <oslc_rm:RequirementCollection>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
-    <dcterms:description rdf:parseType="Literal">
-      <div xmlns="http://www.w3.org/1999/xhtml"><p><strong>[AI Generated]</strong></p>{desc_xhtml}</div>
-    </dcterms:description>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
+    <dcterms:description rdf:parseType="Literal">{desc_xhtml}</dcterms:description>
     <oslc:instanceShape rdf:resource="{module_shape}"/>
   </oslc_rm:RequirementCollection>
 </rdf:RDF>'''
@@ -969,7 +966,7 @@ class DOORSNextClient:
             )
             if resp.status_code == 201:
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
             error_msg = self._extract_oslc_error(resp.text)
@@ -1407,8 +1404,7 @@ class DOORSNextClient:
 
         Args:
             project_url: The project's service provider URL
-            title: Requirement title (will be prefixed with [AI Generated])
-            content: Rich text content as plain text (converted to XHTML)
+            title: Requirement title            content: Rich text content as plain text (converted to XHTML)
             shape_url: The artifact type shape URL (e.g., System Requirement)
             folder_url: Optional folder URL to place the artifact in
             link_uri: Optional link type URI (e.g., a Satisfies link type URL)
@@ -1425,8 +1421,7 @@ class DOORSNextClient:
         encoded_pa = urllib.parse.quote(project_area_url, safe='')
         creation_url = f"{self.base_url}/requirementFactory?projectURL={encoded_pa}"
 
-        # Prefix title with [AI Generated]
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+        clean_title = title.strip()
 
         # Convert plain text content to XHTML
         xhtml_content = self._text_to_xhtml(content)
@@ -1471,7 +1466,7 @@ class DOORSNextClient:
          xmlns:nav="http://jazz.net/ns/rm/navigation#"
          xmlns:jazz_rm="http://jazz.net/ns/rm#"{extra_ns}>
   <oslc_rm:Requirement>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description rdf:parseType="Literal"></dcterms:description>
     <jazz_rm:primaryText rdf:parseType="Literal">{xhtml_content}</jazz_rm:primaryText>
     <oslc:instanceShape rdf:resource="{shape_url}"/>
@@ -1494,7 +1489,7 @@ class DOORSNextClient:
             )
             if resp.status_code == 201:
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
             error_msg = self._extract_oslc_error(resp.text)
@@ -1624,7 +1619,7 @@ class DOORSNextClient:
 
         Accepts three input shapes (LLM picks whichever is easiest):
           1. Raw XHTML — if the text starts with '<' and parses as XML, it's
-             passed through with only the [AI Generated] header prepended.
+             passed through verbatim, wrapped in an XHTML namespace div.
              Best for tables / images / complex layouts the LLM hand-builds.
           2. Markdown — if the `markdown` library is available, headings,
              tables, images, lists, links, bold/italic, and code blocks all
@@ -1650,7 +1645,6 @@ class DOORSNextClient:
                 inner = m.group(1)
             return (
                 '<div xmlns="http://www.w3.org/1999/xhtml">'
-                '<p><strong>[AI Generated]</strong></p>'
                 f'{inner}'
                 '</div>'
             )
@@ -1667,7 +1661,6 @@ class DOORSNextClient:
             # text content. Tables/images/lists are real elements.
             return (
                 '<div xmlns="http://www.w3.org/1999/xhtml">'
-                '<p><strong>[AI Generated]</strong></p>'
                 f'{html}'
                 '</div>'
             )
@@ -1698,7 +1691,6 @@ class DOORSNextClient:
         body = ''.join(xhtml_parts)
         return (
             '<div xmlns="http://www.w3.org/1999/xhtml">'
-            '<p><strong>[AI Generated]</strong></p>'
             f'{body}'
             '</div>'
         )
@@ -1818,8 +1810,7 @@ class DOORSNextClient:
 
         Args:
             project_url: The project's service provider URL
-            title: Baseline name (will be prefixed with [AI Generated])
-            description: Optional baseline description
+            title: Baseline name            description: Optional baseline description
 
         Returns:
             Dict with 'title', 'url', 'task_url' on success, or {'error': '...'} on failure.
@@ -1832,7 +1823,7 @@ class DOORSNextClient:
             return {'error': 'Could not discover component/stream for this project. '
                     'Configuration management may not be enabled.'}
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+        clean_title = title.strip()
 
         desc_element = ''
         if description:
@@ -1843,7 +1834,7 @@ class DOORSNextClient:
          xmlns:dcterms="http://purl.org/dc/terms/"
          xmlns:oslc_config="http://open-services.net/ns/config#">
   <oslc_config:Baseline rdf:about="">
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>{desc_element}
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>{desc_element}
     <oslc_config:component rdf:resource="{config['component_url']}"/>
     <oslc_config:overrides rdf:resource="{config['stream_url']}"/>
   </oslc_config:Baseline>
@@ -1866,7 +1857,7 @@ class DOORSNextClient:
             if resp.status_code in [200, 201, 202]:
                 task_url = resp.headers.get('Location', '')
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': task_url,  # For 202, this is the task tracker URL
                     'task_url': task_url if resp.status_code == 202 else '',
                     'stream_title': config['stream_title'],
@@ -2018,8 +2009,7 @@ class DOORSNextClient:
 
         Args:
             service_provider_url: EWM project's service provider URL
-            title: Task title (will be prefixed with [AI Generated])
-            description: Task description
+            title: Task title            description: Task description
             requirement_url: Optional DNG requirement URL for calm:implementsRequirement link
         """
         self._ensure_auth()
@@ -2029,8 +2019,8 @@ class DOORSNextClient:
         if not creation_url:
             return {'error': 'No Task creation factory found for this project'}
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
-        desc_body = f"[AI Generated]\n\n{description}" if description else "[AI Generated]"
+        clean_title = title.strip()
+        desc_body = description or ""
 
         # Build cross-tool link if requirement URL provided
         link_element = ''
@@ -2043,7 +2033,7 @@ class DOORSNextClient:
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
          xmlns:dcterms="http://purl.org/dc/terms/"{calm_ns}>
   <rdf:Description>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>{link_element}
   </rdf:Description>
 </rdf:RDF>'''
@@ -2062,7 +2052,7 @@ class DOORSNextClient:
             )
             if resp.status_code in [200, 201]:
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
             error_msg = self._extract_oslc_error(resp.text)
@@ -2159,8 +2149,7 @@ class DOORSNextClient:
 
         Args:
             service_provider_url: ETM project's service provider URL
-            title: Test case title (will be prefixed with [AI Generated])
-            description: Test case description/steps
+            title: Test case title            description: Test case description/steps
             requirement_url: Optional DNG requirement URL for oslc_qm:validatesRequirement link
         """
         self._ensure_auth()
@@ -2170,8 +2159,8 @@ class DOORSNextClient:
         if not creation_url:
             return {'error': 'No TestCase creation factory found for this project'}
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
-        desc_body = f"[AI Generated]\n\n{description}" if description else "[AI Generated]"
+        clean_title = title.strip()
+        desc_body = description or ""
 
         link_element = ''
         if requirement_url:
@@ -2182,7 +2171,7 @@ class DOORSNextClient:
          xmlns:dcterms="http://purl.org/dc/terms/"
          xmlns:oslc_qm="http://open-services.net/ns/qm#">
   <oslc_qm:TestCase>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>{link_element}
   </oslc_qm:TestCase>
 </rdf:RDF>'''
@@ -2201,7 +2190,7 @@ class DOORSNextClient:
             )
             if resp.status_code in [200, 201]:
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
             error_msg = self._extract_oslc_error(resp.text)
@@ -2215,8 +2204,7 @@ class DOORSNextClient:
 
         Args:
             service_provider_url: ETM project's service provider URL
-            title: Test result title (will be prefixed with [AI Generated])
-            test_case_url: URL of the Test Case this result reports on
+            title: Test result title            test_case_url: URL of the Test Case this result reports on
             status: Result status — 'passed', 'failed', 'blocked', 'incomplete', or 'error'
         """
         self._ensure_auth()
@@ -2226,7 +2214,7 @@ class DOORSNextClient:
         if not creation_url:
             return {'error': 'No TestResult creation factory found for this project'}
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
+        clean_title = title.strip()
 
         # Map friendly status to OSLC QM status values
         status_map = {
@@ -2243,7 +2231,7 @@ class DOORSNextClient:
          xmlns:dcterms="http://purl.org/dc/terms/"
          xmlns:oslc_qm="http://open-services.net/ns/qm#">
   <oslc_qm:TestResult>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <oslc_qm:reportsOnTestCase rdf:resource="{test_case_url}"/>
     <oslc_qm:status>{oslc_status}</oslc_qm:status>
   </oslc_qm:TestResult>
@@ -2263,7 +2251,7 @@ class DOORSNextClient:
             )
             if resp.status_code in [200, 201]:
                 return {
-                    'title': prefixed_title,
+                    'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
             error_msg = self._extract_oslc_error(resp.text)
@@ -3424,8 +3412,8 @@ class DOORSNextClient:
                     except Exception:
                         pass
 
-        prefixed_title = f"[AI Generated] {title}" if not title.startswith("[AI Generated]") else title
-        desc_body = f"[AI Generated]\n\n{description}" if description else "[AI Generated]"
+        clean_title = title.strip()
+        desc_body = description or ""
 
         # Build extra triples
         extras = []
@@ -3446,7 +3434,7 @@ class DOORSNextClient:
          xmlns:rtc_cm="http://jazz.net/xmlns/prod/jazz/rtc/cm/1.0/"
          xmlns:calm="http://jazz.net/xmlns/prod/jazz/calm/1.0/">
   <rdf:Description>
-    <dcterms:title>{self._escape_xml(prefixed_title)}</dcterms:title>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>
     {''.join('    ' + e + chr(10) for e in extras)}
   </rdf:Description>
@@ -3465,7 +3453,7 @@ class DOORSNextClient:
                 timeout=self._TIMEOUT,
             )
             if resp.status_code in [200, 201]:
-                return {'title': prefixed_title, 'url': resp.headers.get('Location', '')}
+                return {'title': clean_title, 'url': resp.headers.get('Location', '')}
             error_msg = self._extract_oslc_error(resp.text)
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg
                     else f"HTTP {resp.status_code}"}

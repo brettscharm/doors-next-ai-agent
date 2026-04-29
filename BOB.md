@@ -120,14 +120,12 @@ When generating requirements, follow these rules from IEEE 29148 and INCOSE best
 **Steps:**
 1. Call `get_artifact_types` with `project_identifier` to discover what artifact types are available for this project. If the user wants links, also call `get_link_types` with `project_identifier`.
 2. Generate the requirements following the rules above. Use artifact type names from the `get_artifact_types` output — do NOT guess type names.
-3. **Build the folder name** using this format: `AI Generated - [username] - [short summary]`
-   - Example: `AI Generated - brett.scharmett - Security Requirements`
-   - Use the DNG username from the connect step and a 2-4 word summary of what was requested
+3. **Build the folder name** as a short, descriptive label of what's inside (2–6 words). The folder name will also become the module name when one's created. Examples: `Security Requirements`, `Power Management`, `Apollo Spec V1`. Don't add author tags or auto-generated prefixes — keep it readable and human.
 4. **Present them in a clean, readable table** — NOT in code blocks. Use this format:
 
    > Here are the **X requirements** I'd create in [project name]:
    >
-   > **Folder:** AI Generated - brett.scharmett - Security Requirements
+   > **Folder:** Security Requirements
    >
    > | # | Type | Title | Acceptance Criteria |
    > |---|------|-------|---------------------|
@@ -146,7 +144,7 @@ When generating requirements, follow these rules from IEEE 29148 and INCOSE best
 Tell the user:
 > "Done! I created X requirements in the '[folder name]' folder in [project name]. Open DNG to review them. To organize them, create a module in DNG and add these requirements to it."
 
-Note: The `[AI Generated]` prefix and `[AI Generated]` content tag are added automatically by the tool — you do NOT need to add them to titles or content.
+Note: titles and content are stored verbatim. Do not add author/source markers like "[AI Generated]" — keep titles human-readable.
 
 ### Step 3c: PDF IMPORT / RE-IMPORT Path
 When the user provides a PDF to import into DNG (or re-import an updated version):

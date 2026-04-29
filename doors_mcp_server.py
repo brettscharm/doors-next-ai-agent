@@ -622,7 +622,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "Module title (will be prefixed with [AI Generated] if not already)"
+                        "description": "Module title"
                     },
                     "description": {
                         "type": "string",
@@ -640,7 +640,6 @@ async def list_tools() -> list[Tool]:
                 "module_name is what makes requirements visible as a navigable document; folder-only "
                 "requirements (no module_name) end up as orphan artifacts most users can't find. "
                 "MUST call get_artifact_types first to get valid type names for this project. "
-                "[AI Generated] prefix is auto-added to titles. "
                 "Returns created requirement URLs needed by create_task and create_test_case."
             ),
             inputSchema={
@@ -656,7 +655,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "folder_name": {
                         "type": "string",
-                        "description": "Optional folder for the underlying base artifacts (DNG stores every artifact in a folder, even module-bound ones). Defaults to a folder named after the module. Format suggestion: 'AI Generated - [user] - [topic]'."
+                        "description": "Optional folder for the underlying base artifacts (DNG stores every artifact in a folder, even module-bound ones). Defaults to a folder named after the module."
                     },
                     "requirements": {
                         "type": "array",
@@ -666,7 +665,7 @@ async def list_tools() -> list[Tool]:
                             "properties": {
                                 "title": {
                                     "type": "string",
-                                    "description": "Requirement title (will be prefixed with [AI Generated])"
+                                    "description": "Requirement title"
                                 },
                                 "content": {
                                     "type": "string",
@@ -793,7 +792,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "Baseline name (e.g., 'V1 Import Baseline'). Will be prefixed with [AI Generated]."
+                        "description": "Baseline name (e.g., 'V1 Import Baseline')."
                     },
                     "description": {
                         "type": "string",
@@ -883,7 +882,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "Task title (will be prefixed with [AI Generated])"
+                        "description": "Task title"
                     },
                     "description": {
                         "type": "string",
@@ -913,7 +912,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "Test case title (will be prefixed with [AI Generated])"
+                        "description": "Test case title"
                     },
                     "description": {
                         "type": "string",
@@ -1230,7 +1229,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "title": {
                         "type": "string",
-                        "description": "Defect title (will be prefixed with [AI Generated])"
+                        "description": "Defect title"
                     },
                     "description": {
                         "type": "string",
@@ -1937,7 +1936,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             # Default folder name when only module_name was given
             if module_name and not folder_name:
-                folder_name = f"[AI Generated] {module_name}"
+                folder_name = module_name
             if not folder_name and not module_name:
                 return [TextContent(type="text", text=(
                     "Error: provide module_name (preferred — makes the requirements "
@@ -2261,7 +2260,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"- **Title:** {result['title']}\n"
                     f"- **Project:** {project['title']}\n"
                     f"- **URL:** {result['url']}{link_note}\n\n"
-                    f"The task has been created with `[AI Generated]` prefix. "
                     f"A project lead can assign it to an iteration and developer."
                 ))]
             else:
