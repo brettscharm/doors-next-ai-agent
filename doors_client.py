@@ -44,20 +44,26 @@ class DOORSNextClient:
     }
 
     def __init__(self, base_url: str, username: str, password: str, verify_ssl: bool = True):
-        # Normalize: strip trailing slash, extract server root
+        # Normalize: strip trailing slash, extract server root.
+        # Users sometimes paste a domain-specific URL (/rm, /ccm, /qm, /gc)
+        # or the JTS admin URL (/jts, /jts/admin). Strip any of those so
+        # we always derive the bare server root and re-attach each domain
+        # path explicitly.
         base_url = base_url.rstrip('/')
         server_root = base_url
-        for suffix in ['/rm', '/ccm', '/qm', '/gc']:
+        for suffix in ['/jts/admin', '/jts', '/rm/admin', '/rm',
+                       '/ccm/admin', '/ccm', '/qm/admin', '/qm',
+                       '/gc/admin', '/gc']:
             if base_url.endswith(suffix):
                 server_root = base_url[:-len(suffix)]
                 break
 
-        # Set up all endpoints explicitly
+        # One auth, four domain-specific endpoints.
         self.server_root = server_root
-        self.base_url = f"{server_root}/rm"     # DNG
-        self.ccm_url = f"{server_root}/ccm"     # EWM
-        self.qm_url = f"{server_root}/qm"       # ETM
-        self.gc_url = f"{server_root}/gc"        # GCM
+        self.base_url = f"{server_root}/rm"     # DNG (Requirements)
+        self.ccm_url = f"{server_root}/ccm"     # EWM (Work items, SCM)
+        self.qm_url = f"{server_root}/qm"       # ETM (Test management)
+        self.gc_url = f"{server_root}/gc"       # GCM (Global config)
 
         self.username = username
         self.password = password
@@ -67,15 +73,21 @@ class DOORSNextClient:
 
     @classmethod
     def from_env(cls):
-        """Create client from .env file"""
+        """Create client from .env file.
+
+        Reads ELM_URL/ELM_USERNAME/ELM_PASSWORD (preferred — the credentials
+        cover all five ELM domains: DNG/EWM/ETM/GCM/SCM). Falls back to the
+        legacy DOORS_URL/DOORS_USERNAME/DOORS_PASSWORD names so existing
+        installations keep working.
+        """
         load_dotenv()
-        base_url = os.getenv('DOORS_URL')
-        username = os.getenv('DOORS_USERNAME')
-        password = os.getenv('DOORS_PASSWORD')
+        base_url = os.getenv('ELM_URL') or os.getenv('DOORS_URL')
+        username = os.getenv('ELM_USERNAME') or os.getenv('DOORS_USERNAME')
+        password = os.getenv('ELM_PASSWORD') or os.getenv('DOORS_PASSWORD')
         if not all([base_url, username, password]):
             raise ValueError(
                 "Missing environment variables. "
-                "Set DOORS_URL, DOORS_USERNAME, and DOORS_PASSWORD in your .env file."
+                "Set ELM_URL, ELM_USERNAME, and ELM_PASSWORD in your .env file."
             )
         return cls(base_url, username, password)
 

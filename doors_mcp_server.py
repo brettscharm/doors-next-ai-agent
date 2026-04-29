@@ -96,27 +96,25 @@ def _get_or_create_client() -> Optional[DOORSNextClient]:
     if _client is not None:
         return _client
 
-    base_url = os.getenv("DOORS_URL")
-    username = os.getenv("DOORS_USERNAME")
-    password = os.getenv("DOORS_PASSWORD")
+    # Read ELM_* (preferred) with DOORS_* fallback for legacy installs.
+    base_url = os.getenv("ELM_URL") or os.getenv("DOORS_URL")
+    username = os.getenv("ELM_USERNAME") or os.getenv("DOORS_USERNAME")
+    password = os.getenv("ELM_PASSWORD") or os.getenv("DOORS_PASSWORD")
 
     if not all([base_url, username, password]):
         missing = []
         if not base_url:
-            missing.append("DOORS_URL")
+            missing.append("ELM_URL")
         if not username:
-            missing.append("DOORS_USERNAME")
+            missing.append("ELM_USERNAME")
         if not password:
-            missing.append("DOORS_PASSWORD")
+            missing.append("ELM_PASSWORD")
         _client_error = f"Missing .env variables: {', '.join(missing)}"
         return None
 
-    # Normalize URL — ensure it ends with /rm
-    base_url = base_url.strip().rstrip('/')
-    if not base_url.endswith('/rm'):
-        base_url = f"{base_url}/rm"
-
-    client = DOORSNextClient(base_url, username, password)
+    # The client itself normalizes the URL (strips /rm, /ccm, /qm, /gc, /jts
+    # variants and re-attaches per-domain paths). Don't mangle it here.
+    client = DOORSNextClient(base_url.strip(), username, password)
     auth_result = client.authenticate()
     if auth_result['success']:
         _client = client

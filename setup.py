@@ -397,11 +397,15 @@ def configure_hosts(py_exe: str) -> int:
 # ── Step 3: .env creation ────────────────────────────────────
 
 def env_has_real_values() -> bool:
-    """True if .env exists and has non-placeholder values for the 3 keys."""
+    """True if .env has non-placeholder values for URL/USER/PASSWORD.
+
+    Accepts either the new ELM_* names or the legacy DOORS_* names so a
+    pre-existing .env from older installs still counts as configured.
+    """
     if not ENV_FILE.exists():
         return False
-    needed = {"DOORS_URL", "DOORS_USERNAME", "DOORS_PASSWORD"}
-    placeholders = {"your-doors-server.com", "your_username", "your_password", ""}
+    placeholders = {"your-elm-server.com", "your-doors-server.com",
+                    "your_username", "your_password", ""}
     found = {}
     for line in ENV_FILE.read_text().splitlines():
         line = line.strip()
@@ -409,9 +413,17 @@ def env_has_real_values() -> bool:
             continue
         k, _, v = line.partition("=")
         found[k.strip()] = v.strip().strip('"').strip("'")
-    if not needed.issubset(found):
+
+    def has(key_pair):
+        # key_pair is (new_name, legacy_name); we accept either
+        for k in key_pair:
+            if k in found and found[k] and not any(p in found[k] for p in placeholders if p):
+                return True
         return False
-    return all(found[k] and not any(p in found[k] for p in placeholders if p) for k in needed)
+
+    return (has(("ELM_URL", "DOORS_URL"))
+            and has(("ELM_USERNAME", "DOORS_USERNAME"))
+            and has(("ELM_PASSWORD", "DOORS_PASSWORD")))
 
 
 def prompt_for_credentials() -> None:
@@ -432,9 +444,12 @@ def prompt_for_credentials() -> None:
         return
 
     ENV_FILE.write_text(
-        f"DOORS_URL={url}\n"
-        f"DOORS_USERNAME={user}\n"
-        f"DOORS_PASSWORD={pwd}\n"
+        "# IBM ELM credentials. The same login covers DNG, EWM, ETM, GCM, SCM.\n"
+        "# Legacy DOORS_URL/DOORS_USERNAME/DOORS_PASSWORD are also still read\n"
+        "# (with lower priority) so older setups keep working.\n"
+        f"ELM_URL={url}\n"
+        f"ELM_USERNAME={user}\n"
+        f"ELM_PASSWORD={pwd}\n"
     )
     try:
         os.chmod(ENV_FILE, 0o600)

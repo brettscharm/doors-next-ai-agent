@@ -86,12 +86,16 @@ This repo is the **hands**, not the brain. Same server works against any MCP-spe
 `setup.py` walks you through it. Under the hood it writes a local `.env`:
 
 ```
-DOORS_URL=https://your-server.com
-DOORS_USERNAME=your_username
-DOORS_PASSWORD=your_password
+ELM_URL=https://your-elm-server.com
+ELM_USERNAME=your_username
+ELM_PASSWORD=your_password
 ```
 
+One login covers all five ELM domains — DNG, EWM, ETM, GCM, SCM. The URL field accepts any of `https://server`, `https://server/rm`, `https://server/ccm`, `https://server/jts` etc.; the client strips the domain suffix and re-attaches the right path per call.
+
 `.env` is gitignored. The server handles **Basic Auth and Form-Based Auth (`j_security_check`)** automatically and falls back to disabled SSL verification for self-signed certs — you don't need to know which one your server uses.
+
+> **Legacy compat:** older `.env` files using `DOORS_URL` / `DOORS_USERNAME` / `DOORS_PASSWORD` still work. The new `ELM_*` names take precedence when both are set. No migration required — but if you regenerate `.env` via `setup.py` it'll write the new names.
 
 To re-enter credentials later, delete `.env` and re-run `setup.py`.
 
