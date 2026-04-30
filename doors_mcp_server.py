@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -637,6 +637,20 @@ async def read_resource(uri: str) -> str:
 async def list_tools() -> list[Tool]:
     return [
         Tool(
+            name="list_capabilities",
+            description=(
+                "Return the full inventory of what this MCP server can do — every "
+                "tool grouped by domain (DNG / EWM / ETM / GCM / SCM / Charts / "
+                "Server-mgmt) with a one-line description of each. Use this when "
+                "the user asks 'what can you do?', 'list your tools', 'show me "
+                "everything', or 'help'. Always call this — never enumerate from "
+                "memory, since the actual list of registered tools is the source "
+                "of truth and may include tools added in a newer version than "
+                "what this docstring knows about."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
             name="connect_to_elm",
             description=(
                 "Connect to an IBM ELM server with credentials. "
@@ -1012,8 +1026,13 @@ async def list_tools() -> list[Tool]:
             name="create_task",
             description=(
                 "Create an EWM Task work item. "
-                "Optionally links to a DNG requirement via calm:implementsRequirement. "
-                "Use list_projects with domain='ewm' first to find the EWM project."
+                "**ALWAYS pass `requirement_url` when the task implements a DNG requirement** — "
+                "without it, the task is unlinked, traceability breaks, and reports "
+                "(RTM, coverage) won't show the relationship. The URL comes verbatim "
+                "from `create_requirements` output (the `url` field of each created "
+                "requirement) or `get_module_requirements` output. The link is written "
+                "as `calm:implementsRequirement`. Use list_projects with domain='ewm' "
+                "first to find the EWM project."
             ),
             inputSchema={
                 "type": "object",
@@ -1028,11 +1047,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "Task description with details and acceptance criteria"
+                        "description": "Task description with details"
                     },
                     "requirement_url": {
                         "type": "string",
-                        "description": "Optional: URL of a DNG requirement (from get_module_requirements or create_requirements output) to link via Implements Requirement"
+                        "description": "STRONGLY RECOMMENDED. Full URL of the DNG requirement this task implements. Get this verbatim from create_requirements output (each created requirement's `url` field) or get_module_requirements output. Example: 'https://server/rm/resources/TX_xxx'. Omitting this leaves the task unlinked — traceability breaks."
                     }
                 },
                 "required": ["ewm_project", "title"]
@@ -1042,8 +1061,12 @@ async def list_tools() -> list[Tool]:
             name="create_test_case",
             description=(
                 "Create an ETM Test Case. "
-                "Optionally links to a DNG requirement via oslc_qm:validatesRequirement. "
-                "Use list_projects with domain='etm' first to find the ETM project."
+                "**ALWAYS pass `requirement_url` when the test validates a DNG requirement** — "
+                "without it, the test case is unlinked and reports won't show what it "
+                "validates. The URL comes verbatim from `create_requirements` output "
+                "or `get_module_requirements` output. The link is written as "
+                "`oslc_qm:validatesRequirement`. Use list_projects with domain='etm' "
+                "first to find the ETM project."
             ),
             inputSchema={
                 "type": "object",
@@ -1058,11 +1081,45 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "Test case description and test steps"
+                        "description": "Test case description with test steps, expected results, pass/fail criteria"
                     },
                     "requirement_url": {
                         "type": "string",
-                        "description": "Optional: URL of a DNG requirement (from get_module_requirements or create_requirements output) to link via Validates Requirement"
+                        "description": "STRONGLY RECOMMENDED. Full URL of the DNG requirement this test validates. Get this verbatim from create_requirements output (each created requirement's `url` field) or get_module_requirements output. Example: 'https://server/rm/resources/TX_xxx'. Omitting this leaves the test case unlinked — traceability breaks."
+                    }
+                },
+                "required": ["etm_project", "title"]
+            }
+        ),
+        Tool(
+            name="create_test_script",
+            description=(
+                "Create an ETM Test Script — the actual test procedure (numbered "
+                "steps, expected results, pass/fail criteria). Test Cases say "
+                "*what* to verify; Test Scripts say *how* to verify it. Use this "
+                "in addition to `create_test_case` when you want the full "
+                "procedure as a separate, reusable artifact (one script can be "
+                "referenced by multiple test cases). Pass `test_case_url` to "
+                "wire the script to its test case via `oslc_qm:executesTestScript`."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {
+                        "type": "string",
+                        "description": "ETM project number (from list_projects domain=etm) or name"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Test script title (the procedure name, not the test case it validates)"
+                    },
+                    "steps": {
+                        "type": "string",
+                        "description": "Numbered procedure body. Each step typically has: action, expected result, pass/fail. Plain text or simple Markdown. Example:\n\n1. Power on the device.\n   Expected: status LED turns green within 2s.\n   PASS if green within 2s, FAIL otherwise.\n\n2. ..."
+                    },
+                    "test_case_url": {
+                        "type": "string",
+                        "description": "Optional. URL of the Test Case this script executes (from create_test_case output). Wires the script to the case via oslc_qm:executesTestScript so the case knows which procedure to run."
                     }
                 },
                 "required": ["etm_project", "title"]
@@ -1342,26 +1399,42 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="create_link",
             description=(
-                "Create an OSLC link of any type between two existing artifacts. "
+                "Create an OSLC link between two artifacts that already exist. Use this "
+                "when the link wasn't created at artifact-creation time — e.g. linking an "
+                "existing EWM task to an existing DNG requirement after the fact. For "
+                "NEW artifacts, prefer `create_task` / `create_test_case` / "
+                "`create_requirements` with the link arguments — those write the link "
+                "atomically as part of creation.\n\n"
+                "PICK THE RIGHT link_type_uri based on the source/target combination:\n\n"
+                "  • EWM workitem → DNG requirement (Implements):\n"
+                "      http://open-services.net/xmlns/prod/jazz/calm/1.0/implementsRequirement\n"
+                "  • ETM test case → DNG requirement (Validates):\n"
+                "      http://open-services.net/ns/qm#validatesRequirement\n"
+                "  • DNG req → DNG req (Satisfies, Derived From, etc.):\n"
+                "      Call get_link_types(project_identifier) first to discover\n"
+                "      the project's actual link type URLs (LT_xxx). The list\n"
+                "      varies by project — never guess.\n"
+                "  • EWM workitem → EWM workitem (parent/child, related, blocks):\n"
+                "      http://open-services.net/ns/cm#parent  (parent of)\n"
+                "      http://open-services.net/ns/cm#tracksWorkItem  (tracks)\n\n"
                 "Auto-detects source domain (DNG / EWM / ETM) from the URL prefix and uses "
-                "GET-ETag → PUT-If-Match on the source. Pass the source URL, the link type "
-                "URI (e.g. a Satisfies link from get_link_types, or http://open-services.net/ns/cm#implementsRequirement), "
-                "and the target URL. NOTE: DNG normalizes custom link-type predicates after PUT."
+                "GET-ETag → PUT-If-Match on the source resource. NOTE: DNG normalizes "
+                "custom link-type predicates after PUT."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "source_url": {
                         "type": "string",
-                        "description": "Full URL of the source artifact (DNG req, EWM workitem, or ETM resource)"
+                        "description": "Full URL of the source artifact (DNG req, EWM workitem, or ETM test case). The link is stored on the source side of the relationship."
                     },
                     "link_type_uri": {
                         "type": "string",
-                        "description": "Link-type URI — for DNG, a custom LT_ URL from get_link_types or a standard OSLC predicate (e.g. http://open-services.net/ns/rm#satisfies)"
+                        "description": "The full link-type URI. See the cheat sheet in this tool's description for common values. For DNG-internal links, call get_link_types first to discover the project-specific LT_ URLs — don't guess."
                     },
                     "target_url": {
                         "type": "string",
-                        "description": "Full URL of the target artifact"
+                        "description": "Full URL of the target artifact (the thing the source points at)"
                     }
                 },
                 "required": ["source_url", "link_type_uri", "target_url"]
@@ -1594,6 +1667,76 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=_maybe_append_update_notice(body))]
 
         # ── update_elm_mcp (no ELM connection needed) ─────────
+        if name == "list_capabilities":
+            tools = await list_tools()
+            domains = {
+                "Server / Updates": ["list_capabilities", "update_elm_mcp", "connect_to_elm"],
+                "DNG — Read": [
+                    "list_projects", "get_modules", "get_module_requirements",
+                    "search_requirements", "get_artifact_types", "get_link_types",
+                    "get_attribute_definitions", "list_baselines", "compare_baselines",
+                    "save_requirements", "extract_pdf",
+                ],
+                "DNG — Write": [
+                    "create_module", "create_requirements", "update_requirement",
+                    "update_requirement_attributes", "create_link", "create_baseline",
+                ],
+                "EWM (Work Items + Defects)": [
+                    "create_task", "create_defect", "update_work_item",
+                    "transition_work_item", "query_work_items",
+                ],
+                "ETM (Test Management)": [
+                    "create_test_case", "create_test_script", "create_test_result",
+                ],
+                "GCM (Global Configuration)": [
+                    "list_global_configurations", "list_global_components",
+                    "get_global_config_details",
+                ],
+                "EWM SCM (Code / Reviews)": [
+                    "scm_list_projects", "scm_list_changesets", "scm_get_changeset",
+                    "scm_get_workitem_changesets", "review_get", "review_list_open",
+                ],
+                "Visualization": ["generate_chart"],
+            }
+            tool_descs = {t.name: (t.description or "").split(".")[0].strip() + "." for t in tools}
+            lines = [
+                f"# ELM MCP — what I can do (v{__version__})\n",
+                f"**{len(tools)} tools across {len(domains)} domains.** "
+                "Tools subject to the Generation Discipline (interview → preview → "
+                "confirm) are marked with ⚠️.\n",
+            ]
+            write_tools = {
+                "create_module", "create_requirements", "update_requirement",
+                "update_requirement_attributes", "create_link", "create_baseline",
+                "create_task", "create_defect", "update_work_item",
+                "transition_work_item", "create_test_case", "create_test_script",
+                "create_test_result", "generate_chart",
+            }
+            seen = set()
+            for domain, names_in_domain in domains.items():
+                lines.append(f"\n## {domain}\n")
+                for n in names_in_domain:
+                    if n not in tool_descs:
+                        continue
+                    seen.add(n)
+                    marker = " ⚠️" if n in write_tools else ""
+                    lines.append(f"- **`{n}`**{marker} — {tool_descs[n]}")
+            uncategorized = [t.name for t in tools if t.name not in seen]
+            if uncategorized:
+                lines.append("\n## Other (uncategorized — likely added recently)\n")
+                for n in uncategorized:
+                    lines.append(f"- **`{n}`** — {tool_descs[n]}")
+            lines.append(
+                "\n---\n"
+                "**Quick start:** `connect_to_elm` → `list_projects` → "
+                "pick a workflow (read existing reqs / generate new ones / "
+                "import PDF / create EWM tasks / create ETM tests / full "
+                "lifecycle / tiered Business→Stakeholder→System decomposition).\n\n"
+                "**Read-only tools run freely; write tools always show a "
+                "preview and ask for your approval before firing.**"
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
         if name == "update_elm_mcp":
             latest = _fetch_latest_version()
             if not latest:
@@ -2523,6 +2666,48 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "This may be a permissions issue — try a different ETM project."
                 ))]
 
+        # ── create_test_script (ETM) ──────────────────────────
+        elif name == "create_test_script":
+            etm_proj = arguments.get("etm_project", "")
+            title = arguments.get("title", "")
+            steps = arguments.get("steps", "")
+            test_case_url = arguments.get("test_case_url", "")
+
+            if not etm_proj or not title:
+                return [TextContent(type="text", text="Error: etm_project and title are required.")]
+
+            if not _etm_projects_cache:
+                _etm_projects_cache = client.list_etm_projects()
+            project = _find_by_identifier(_etm_projects_cache, etm_proj)
+            if not project:
+                names = "\n".join(f"{i}. {p['title']}" for i, p in enumerate(_etm_projects_cache, 1))
+                return [TextContent(type="text", text=(
+                    f"ETM project not found: '{etm_proj}'\n\nAvailable ETM projects:\n{names}"
+                ))]
+
+            result = client.create_test_script(
+                service_provider_url=project['url'],
+                title=title,
+                steps=steps,
+                test_case_url=test_case_url or None,
+            )
+
+            if result and 'error' not in result:
+                link_note = f"\n- **Linked to test case:** {test_case_url}" if test_case_url else ""
+                return [TextContent(type="text", text=(
+                    f"# Test Script Created in ETM\n\n"
+                    f"- **Title:** {result['title']}\n"
+                    f"- **Project:** {project['title']}\n"
+                    f"- **URL:** {result['url']}{link_note}"
+                ))]
+            err = result.get('error', '') if result else ''
+            return [TextContent(type="text", text=(
+                f"Failed to create test script in '{project['title']}'.\n{err}\n\n"
+                "If the error mentions 'No TestScript creation factory', that ETM "
+                "project doesn't expose the TestScript factory in its services.xml — "
+                "rare but possible on locked-down deployments."
+            ))]
+
         # ── create_test_result (ETM) ──────────────────────────
         elif name == "create_test_result":
             etm_proj = arguments.get("etm_project", "")
@@ -2735,11 +2920,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 plt.close(fig)
 
             return [TextContent(type="text", text=(
-                f"Chart saved: {out_path}\n\n"
-                f"- Type: {chart_type}\n"
-                f"- Title: {title}\n"
-                f"- Data points: {len(labels)}\n"
-                f"- Total: {sum(values):g}"
+                f"# Chart saved\n\n"
+                f"![{title}]({out_path})\n\n"
+                f"- **File:** `{out_path}`\n"
+                f"- **Open in Finder:** `open \"{charts_dir}\"`\n"
+                f"- **Type:** {chart_type}\n"
+                f"- **Title:** {title}\n"
+                f"- **Data points:** {len(labels)}\n"
+                f"- **Total:** {sum(values):g}\n\n"
+                f"The image above is a markdown image link to the absolute path — "
+                f"AI hosts that render markdown will display the chart inline. "
+                f"Otherwise, click/copy the file path to open it directly."
             ))]
 
         # ── get_attribute_definitions (DNG) ────────────────────

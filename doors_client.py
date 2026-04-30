@@ -2132,16 +2132,24 @@ class DOORSNextClient:
         clean_title = title.strip()
         desc_body = description or ""
 
-        # Build cross-tool link if requirement URL provided
+        # Build cross-tool link if requirement URL provided.
+        # Note on the predicate: calm:implementsRequirement
+        # (http://open-services.net/xmlns/prod/jazz/calm/1.0/implementsRequirement)
+        # is the one IBM publishes as the canonical CALM predicate, but EWM
+        # silently DROPS it on POST — verified by probe/22_ewm_link_variants.
+        # The predicate that actually persists is oslc_cm:implementsRequirement
+        # (http://open-services.net/ns/cm#implementsRequirement). Confirmed
+        # against the live server: stored as both a direct triple and a
+        # reified statement.
         link_element = ''
-        calm_ns = ''
+        link_ns = ''
         if requirement_url:
-            calm_ns = '\n         xmlns:calm="http://jazz.net/xmlns/prod/jazz/calm/1.0/"'
-            link_element = f'\n    <calm:implementsRequirement rdf:resource="{requirement_url}"/>'
+            link_ns = '\n         xmlns:oslc_cm="http://open-services.net/ns/cm#"'
+            link_element = f'\n    <oslc_cm:implementsRequirement rdf:resource="{requirement_url}"/>'
 
         rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-         xmlns:dcterms="http://purl.org/dc/terms/"{calm_ns}>
+         xmlns:dcterms="http://purl.org/dc/terms/"{link_ns}>
   <rdf:Description>
     <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>{link_element}
@@ -2303,6 +2311,70 @@ class DOORSNextClient:
                     'title': clean_title,
                     'url': resp.headers.get('Location', ''),
                 }
+            error_msg = self._extract_oslc_error(resp.text)
+            return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def create_test_script(self, service_provider_url: str, title: str,
+                            steps: str = '',
+                            test_case_url: Optional[str] = None) -> Optional[Dict]:
+        """Create a Test Script in ETM.
+
+        A Test Script is the actual test procedure (the steps the tester
+        runs). Test Cases are typically the *what* (one verifiable behavior);
+        Test Scripts are the *how* (the procedure). One Test Case can
+        execute multiple Test Scripts; one Test Script can be referenced
+        by multiple Test Cases.
+
+        Args:
+            service_provider_url: ETM project's service provider URL
+            title: Test script title
+            steps: Test procedure body (steps, expected results, pass/fail
+                conditions). Stored in dcterms:description as plain text;
+                ETM also accepts XHTML for richer formatting.
+            test_case_url: Optional Test Case URL to link this script to via
+                oslc_qm:executionInstructions (so the test case knows which
+                script to run).
+        """
+        self._ensure_auth()
+
+        factories = self._get_etm_creation_factories(service_provider_url)
+        creation_url = factories.get('TestScript')
+        if not creation_url:
+            return {'error': 'No TestScript creation factory found for this project'}
+
+        clean_title = title.strip()
+        desc_body = steps or ""
+
+        link_element = ''
+        if test_case_url:
+            link_element = f'\n    <oslc_qm:executesTestScript rdf:resource="{test_case_url}"/>'
+
+        rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:oslc_qm="http://open-services.net/ns/qm#">
+  <oslc_qm:TestScript>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
+    <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>{link_element}
+  </oslc_qm:TestScript>
+</rdf:RDF>'''
+
+        try:
+            resp = self.session.post(
+                creation_url,
+                data=rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code in [200, 201]:
+                return {'title': clean_title, 'url': resp.headers.get('Location', '')}
             error_msg = self._extract_oslc_error(resp.text)
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
         except Exception as e:
@@ -3532,7 +3604,10 @@ class DOORSNextClient:
         if severity_uri:
             extras.append(f'<oslc_cmx:severity rdf:resource="{severity_uri}"/>')
         if requirement_url:
-            extras.append(f'<calm:affectedByDefect rdf:resource="{requirement_url}"/>')
+            # Same lesson as create_ewm_task: calm: predicates get silently
+            # dropped by EWM. Use the oslc_cm: namespace (which actually
+            # persists) and the standard "affectsRequirement" semantic.
+            extras.append(f'<oslc_cm:affectsRequirement rdf:resource="{requirement_url}"/>')
         if test_case_url:
             extras.append(f'<oslc_cm:relatedTestCase rdf:resource="{test_case_url}"/>')
 
@@ -3541,8 +3616,7 @@ class DOORSNextClient:
          xmlns:dcterms="http://purl.org/dc/terms/"
          xmlns:oslc_cm="http://open-services.net/ns/cm#"
          xmlns:oslc_cmx="http://open-services.net/ns/cm-x#"
-         xmlns:rtc_cm="http://jazz.net/xmlns/prod/jazz/rtc/cm/1.0/"
-         xmlns:calm="http://jazz.net/xmlns/prod/jazz/calm/1.0/">
+         xmlns:rtc_cm="http://jazz.net/xmlns/prod/jazz/rtc/cm/1.0/">
   <rdf:Description>
     <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
     <dcterms:description>{self._escape_xml(desc_body)}</dcterms:description>

@@ -69,14 +69,61 @@ cd "$INSTALL_DIR"
 "$PY" setup.py
 
 # ── Done ─────────────────────────────────────────────────────
-step "[4/4] Done"
+step "[4/4] Done — and here's the manual-fallback info"
+PY_ABS=$(command -v "$PY")
+SERVER_ABS="$INSTALL_DIR/doors_mcp_server.py"
 say ""
 say "  ${GREEN}✓${RESET} ELM MCP installed at: ${BOLD}$INSTALL_DIR${RESET}"
-say "  ${GREEN}✓${RESET} Restart your AI assistant (IBM Bob / Claude Code / etc.) so it loads the new MCP server."
-say ""
-say "  Then say in your AI:"
+say "  ${GREEN}✓${RESET} Configs written to every AI host detected."
+say "  ${GREEN}✓${RESET} Now: ${BOLD}fully quit and reopen your AI assistant${RESET} (Cmd+Q on macOS), then say:"
 say "    ${BOLD}\"Connect to ELM and list my projects\"${RESET}"
 say ""
-say "  ${DIM}To re-run later: re-run this same curl command, or:${RESET}"
+say "${BOLD}If your AI doesn't see the MCP server after restart${RESET} (e.g. some IBM Bob"
+say "deployments don't auto-load configs), paste the JSON below into the right"
+say "config file for your host. The two paths in it are already filled in for"
+say "your machine."
+say ""
+say "${BOLD}Where the file goes${RESET} (create it if missing):"
+say "  • IBM Bob (recommended):  ${BOLD}~/.bob/mcp_settings.json${RESET}"
+say "  • Claude Code:            ${BOLD}~/.claude.json${RESET}"
+say "  • VS Code:                ${BOLD}<your-project>/.vscode/mcp.json${RESET}  (uses 'servers' key, not 'mcpServers')"
+say "  • Cursor:                 ${BOLD}~/.cursor/mcp.json${RESET}"
+say "  • Windsurf:               ${BOLD}~/.codeium/windsurf/mcp_config.json${RESET}"
+say ""
+say "${BOLD}JSON to paste${RESET} (top-level key 'mcpServers' for Bob/Claude/Cursor/Windsurf;"
+say "VS Code uses 'servers' instead):"
+say ""
+cat <<JSON
+{
+  "mcpServers": {
+    "doors-next": {
+      "command": "$PY_ABS",
+      "args": [
+        "$SERVER_ABS"
+      ],
+      "alwaysAllow": [
+        "connect_to_elm", "list_projects", "get_modules",
+        "get_module_requirements", "save_requirements",
+        "search_requirements", "get_artifact_types", "get_link_types",
+        "get_attribute_definitions", "list_baselines",
+        "compare_baselines", "extract_pdf",
+        "list_global_configurations", "list_global_components",
+        "get_global_config_details", "query_work_items",
+        "scm_list_projects", "scm_list_changesets",
+        "scm_get_changeset", "scm_get_workitem_changesets",
+        "review_get", "review_list_open", "generate_chart",
+        "update_elm_mcp"
+      ]
+    }
+  }
+}
+JSON
+say ""
+say "${BOLD}Your filled-in paths (you can also copy these directly):${RESET}"
+say "  Python interpreter:  ${BOLD}$PY_ABS${RESET}"
+say "  Server script:       ${BOLD}$SERVER_ABS${RESET}"
+say ""
+say "  ${DIM}To update later: re-run this same curl command, or:${RESET}"
 say "    ${DIM}cd \"$INSTALL_DIR\" && git pull && $PY setup.py${RESET}"
+say "  ${DIM}Or just talk to your AI: \"update yourself\" (uses the update_elm_mcp tool).${RESET}"
 say ""

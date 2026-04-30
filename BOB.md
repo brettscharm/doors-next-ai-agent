@@ -39,7 +39,7 @@ PHASE 1 — REQUIREMENTS (DNG)
   Status starts at "Proposed". → STOP. "Review these. Approve to continue?"
                                                            ↓
 PHASE 2 — IMPLEMENTATION TASKS (EWM)        only if user wants
-  One Task per requirement. Linked via calm:implementsRequirement.
+  One Task per requirement. Linked via oslc_cm:implementsRequirement.
   → "Want me to create test cases too?"
                                                            ↓
 PHASE 3 — TEST CASES (ETM)                  only if user wants
@@ -83,10 +83,23 @@ PHASE 4 — DEFECTS (EWM)                     when tests fail
 **Why this matters:** AI-generated requirements / tasks / tests are only valuable if they reflect the user's actual intent. Skipping the interview turns this MCP into a slop generator that produces plausible but useless content. The 30 seconds of conversation up front saves an hour of cleanup later.
 
 **Tools subject to this rule:**
-`create_requirements`, `create_module`, `update_requirement`, `update_requirement_attributes`, `create_task`, `create_defect`, `update_work_item`, `transition_work_item`, `create_test_case`, `create_test_result`, `create_link`, `create_baseline`.
+`create_requirements`, `create_module`, `update_requirement`, `update_requirement_attributes`, `create_task`, `create_defect`, `update_work_item`, `transition_work_item`, `create_test_case`, `create_test_script`, `create_test_result`, `create_link`, `create_baseline`, `generate_chart`.
+
+(`generate_chart` is included because picking the wrong chart type, the wrong aggregation, or the wrong slice of data wastes the user's time the same way bad requirements do. Always interview before charting — see "Chart generation" below.)
 
 **Tools NOT subject (read-only — call freely):**
-all `list_*`, all `get_*`, all `search_*`, all `query_*`, all `scm_*`, `review_get`, `review_list_open`, `extract_pdf`, `save_requirements`, `generate_chart`, `connect_to_elm`, `compare_baselines`.
+all `list_*`, all `get_*`, all `search_*`, all `query_*`, all `scm_*`, `review_get`, `review_list_open`, `extract_pdf`, `save_requirements`, `connect_to_elm`, `compare_baselines`, `list_capabilities`, `update_elm_mcp`.
+
+### Chart generation — short interview
+
+Before calling `generate_chart`, ask the user enough that the chart is actually what they want. Don't just guess from a vague "show me a chart of requirements":
+
+1. **What's being counted/measured?** (status counts, type counts, test pass/fail, requirements per module, tasks per priority, etc.)
+2. **Across what scope?** (one module, one project, all projects, a specific time window)
+3. **Chart type?** Suggest one based on the data — `pie` for proportions, `bar`/`hbar` for category comparisons (use `hbar` when labels are long), `line` for trends. Confirm.
+4. **Title?** Default to something descriptive ("Requirements by Status — Power Management module") but let them override.
+
+After confirmation, fetch the data with the read-only tools, aggregate locally (count/group/sum), then call `generate_chart`. The response includes an `![title](/abs/path)` markdown image link — surface it to the user so the chart renders inline.
 
 ## Conversation Flow (Follow This Exactly)
 
@@ -197,7 +210,7 @@ After `create_requirements` succeeds, tell the user:
 > "Done — I created [N] requirements in the '[Module Name]' module in [project name]. Each requirement is a clean 'shall' statement; verification details aren't in them yet.
 >
 > Want me to:
-> 1. **Generate EWM Tasks** — one implementation Task per requirement, linked back via `calm:implementsRequirement` (Phase 2 of the lifecycle)?
+> 1. **Generate EWM Tasks** — one implementation Task per requirement, linked back via `oslc_cm:implementsRequirement` (Phase 2 of the lifecycle)?
 > 2. **Generate ETM Test Cases** — one Test Case per requirement, linked via `oslc_qm:validatesRequirement`, with the test steps and pass/fail criteria that go with each requirement (Phase 3 of the lifecycle)?
 > 3. **Both?**
 > 4. **Skip for now** and stop here.
@@ -309,7 +322,11 @@ When the user wants to create EWM tasks from requirements:
    >
    > **Each task will be linked to its source requirement. Want me to push these to EWM?**
 
-3. Only after explicit confirmation → call `create_task` for each task with `ewm_project`, `title`, `description`, and `requirement_url`
+3. Only after explicit confirmation → call `create_task` for each task with `ewm_project`, `title`, `description`, **AND `requirement_url`**.
+
+   **CRITICAL — `requirement_url` is what creates the link.** Pass it verbatim — copy the URL from the `url` field of each requirement in the previous `create_requirements` or `get_module_requirements` output. Do NOT paraphrase, do NOT use the requirement's friendly ID — use the literal `https://server/rm/resources/TX_xxx` URL. Without this field, the task is created but unlinked, and traceability breaks. **If you're creating N tasks for N requirements, you must pass N different `requirement_url` values, one per task.**
+
+4. After all tasks are created, verify the linking worked: pick one task URL from the response and re-fetch it (the response should include `oslc_cm:implementsRequirement` pointing at the requirement). If any task came back without the link, fix it by calling `create_link` with `link_type_uri="http://open-services.net/ns/cm#implementsRequirement"`, `source_url=<task URL>`, `target_url=<requirement URL>`.
 
 **Phase 3: Confirm delivery**
 
@@ -346,7 +363,11 @@ When the user wants to create ETM test cases from requirements:
    >
    > **Each test case will be linked to its source requirement. Want me to push these to ETM?**
 
-3. Only after explicit confirmation → call `create_test_case` for each with `etm_project`, `title`, `description`, and `requirement_url`
+3. Only after explicit confirmation → call `create_test_case` for each with `etm_project`, `title`, `description`, **AND `requirement_url`**.
+
+   **CRITICAL — `requirement_url` is what creates the link.** Pass it verbatim from the `url` field of each requirement in the previous `create_requirements` or `get_module_requirements` output. Same rules as for tasks: literal URL only (`https://server/rm/resources/TX_xxx`), one URL per test case, never skip this field when validating an existing requirement. Without it, the test case is created but unlinked — coverage reports won't show it validates anything.
+
+   After all test cases are created, verify by re-fetching one and confirming `oslc_qm:validatesRequirement` points at the requirement. If any came back without the link, fix it: call `create_link` with `link_type_uri="http://open-services.net/ns/qm#validatesRequirement"`, `source_url=<test case URL>`, `target_url=<requirement URL>`.
 
 **Phase 3: Record test results (optional)**
 
@@ -494,8 +515,8 @@ Only proceed after the user explicitly confirms. If ALL requirements ARE Approve
 - The only tool that modifies existing artifacts is `update_requirement` — and it REQUIRES showing the diff and getting approval first
 - **NEVER** touch Approved requirements unless the user explicitly confirms
 - **ALWAYS** show the user what will be created or changed and get explicit confirmation before writing
-- The human is responsible for approving requirements, assigning work items, and dragging requirements into modules (see below)
-- **`create_module` works** — call it to create a new DNG module artifact. **But adding requirements to a module's structure programmatically is locked down by DNG** on most server deployments — `oslc_rm:uses` writes return `400 "Content must be valid rdf+xml"` even though the body is valid XML. After `create_requirements` runs, the requirements live in a folder; tell the user to drag them into the module in the DNG web UI. ReqIF import is the only documented programmatic alternative and is not yet implemented. (Full investigation: `probe/MODULE_BINDING_FINDINGS.md`.)
+- The human is responsible for approving requirements and assigning work items.
+- **`create_module` works** and **`create_requirements` with `module_name` auto-binds the requirements to the module** — no manual drag-bind in DNG needed. Under the hood this uses DNG's Module Structure API (the writable `<module>/structure` resource, gated by the `DoorsRP-Request-Type: public 2.0` header). The legacy `oslc_rm:uses` PUT route is locked down by DNG, but the structure API works fine — see `client.add_to_module()` and `probe/MODULE_BINDING_FINDINGS.md` for the recipe.
 - If deriving work from non-approved requirements, the generated artifacts must include a note:
   > "[AI Generated] Note: Generated from requirements that were not yet Approved at time of creation."
 
