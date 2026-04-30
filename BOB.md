@@ -148,7 +148,8 @@ When the user picks a project (by name or number), ask:
 > 4. **Import PDF** — Parse a PDF into requirements and push to DNG (or re-import updated version)
 > 5. **Create Tasks** — Generate EWM work items from requirements
 > 6. **Create Test Cases** — Generate ETM test cases from requirements
-> 7. **Full Lifecycle** — Requirements → Tasks → Test Cases (all three)"
+> 7. **Full Lifecycle** — Requirements → Tasks → Test Cases (all three)
+> 8. **Build a Project End-to-End** — full agentic dev: requirements → tasks → tests → user reviews in ELM → I re-pull → write the code, with ELM as source of truth throughout (see Step 3h)"
 
 ### Step 3a: READ Path
 
@@ -665,6 +666,112 @@ If the user picks 1/2/3, run Step 3d / 3e against the System Requirements URLs f
 - If the user rejects or modifies a tier, regenerate before moving to the next
 - If the user wants only 2 tiers (e.g. Business → System, skipping Stakeholder), drop Phase 2 and link System directly to Business
 - Use `get_link_types(project_identifier)` first to see what link names this project uses — "Satisfies" is the most common but some projects use "Derived From", "Implements", or custom names
+
+### Step 3h: BUILD-PROJECT Path (end-to-end agentic dev with ELM as source of truth)
+
+When the user says **"build a project"**, **"do an end-to-end build"**, **"agentic development"**, or invokes the `/build-project` prompt — run this 9-phase sequence. This is the headline demo: a one-line idea becomes fully-traced requirements + tasks + test cases in ELM, then the user reviews them in ELM, then the AI writes the actual code based on the finalized state.
+
+**Critical invariants for this path:**
+- Every phase has a user-approval gate. Don't skip gates.
+- After Phase 4, **STOP for user review in ELM**. Do NOT write code yet.
+- Phase 6 RE-PULLS state from ELM — code is built from current ELM state, not what was generated.
+- ELM is the system of record. Code references requirement IDs back to ELM.
+
+#### PHASE 0 — Verify connection + project access
+Call `connect_to_elm` if not connected. Confirm the DNG / EWM / ETM project names with the user (offer `list_projects` per domain if they don't know). All three projects can be the same family (e.g. "ELM AI Hub - Bretts Sandbox (Requirements)" + "(Change Management)" + "(Quality Management)").
+
+#### PHASE 1 — Project intake (interview, no tools)
+Ask 4–6 short questions. One at a time:
+1. *"One-paragraph description — what does the user actually do with this thing?"*
+2. *"Tech stack / platform — web app, API service, embedded, mobile, etc.?"*
+3. *"Standards / compliance — DO-178C, ISO 26262, NIST 800-53, none?"*
+4. *"Approximate scale — handful (5–10 reqs), moderate (15–25), comprehensive (30+)?"*
+5. *"Integrations or external interfaces?"*
+6. *"Any specific must-haves or must-not-haves?"*
+
+Confirm a one-line scope back to the user. Get a "yes that's right" before moving on.
+
+#### PHASE 2 — Requirements (DNG)
+Run **Step 3b** (single-tier — one System Requirements module) OR **Step 3g** (tiered — Business → Stakeholder → System) depending on the project's complexity and what the user picked. Generate internally → preview-with-structure → user-approval → push with `module_name` set so requirements auto-bind. Surface module URL + every requirement URL as markdown links.
+
+(Server-side validation rejects requirements with embedded acceptance criteria / business value / stakeholder needs — those go in test cases or a higher tier respectively. Don't fight it; emit clean shall-statements.)
+
+#### PHASE 3 — Implementation tasks (EWM)
+Run **Step 3d**. One EWM task per System Requirement (the most-derived tier — not Business / Stakeholder reqs at the top tiers). Brief task body — Objective + Deliverables + Dependencies. Don't copy the requirement text; link via `requirement_url`. Preview → user-approval → push.
+
+#### PHASE 4 — Test cases (ETM)
+Run **Step 3e**. One Test Case per System Requirement, with full Preconditions / Test Steps / Pass-Fail Criteria (these DO belong in test cases). Optionally also `create_test_script` for detailed procedure steps. Preview → user-approval → push linked to source reqs.
+
+#### PHASE 5 — STOP for user review in ELM
+This is the biggest gate. **Tell the user explicitly:**
+
+> *"Phase 2–4 complete. Open ELM in your browser and review what's there:*
+> *- DNG modules: [Business Requirements](url1), [System Requirements](url2)*
+> *- EWM tasks: [list of task links]*
+> *- ETM test cases: [list of test-case links]*
+>
+> *In ELM you can: approve / reject / modify any requirement, mark statuses (only Approved requirements will drive the code), reassign or reprioritize tasks, rewrite test cases, add new ones, drop ones that don't fit.*
+>
+> *When you're done, come back here and say **'continue'** or **'build it'** or **'pull latest'**. I'll re-fetch the current state from ELM and start writing the actual application code based on the finalized artifacts.*
+>
+> **I'm waiting for your signal — not generating code yet.**"
+
+Then **wait silently**. Don't poll, don't generate, don't move on. The user may take 5 minutes or 5 days; that's fine.
+
+#### PHASE 6 — Re-pull current state from ELM
+When the user says "continue" / "build it" / "pull latest":
+1. Re-fetch the System Requirements module via `get_module_requirements` with `filter={"Status": "Approved"}` (use `get_attribute_definitions` first to discover what the project's "approved" status value is — never guess).
+2. Re-fetch all EWM tasks via `query_work_items` with `oslc.where=oslc_cm:closed=false` (or filter to current iteration if the user planned them).
+3. Re-fetch all linked test cases via `query_work_items` against the ETM project, or by following the `oslc_qm:validatesRequirement` backlinks.
+4. Show the user a current-state summary:
+
+> *"Here's what I see in ELM now:*
+> *- {N} approved requirements (was {M} originally — {M-N} were rejected, dropped, or still in review)*
+> *- {K} active tasks (was {L} — {L-K} were closed, moved, or reassigned)*
+> *- {J} test cases ({J-J'} updated since I created them)*
+>
+> *Building based on this current state. Confirm and I'll start writing code."*
+
+Wait for confirmation. **Even now, don't skip the gate.**
+
+#### PHASE 7 — Write the code
+Once Phase 6 is confirmed, write the actual application code in the user's IDE (this is what the AI host's editing capabilities are for). Rules:
+
+- **Each file has a header comment listing the requirement IDs it implements.** Example:
+  ```
+  # Implements: REQ-005 (password validation), REQ-007 (real-time feedback)
+  # Source: https://server/rm/resources/TX_xxx, https://server/rm/resources/TX_yyy
+  ```
+- Code structure should mirror requirement structure where reasonable (one module/class/function per req or req-group).
+- Tests in the codebase should reference test case URLs from ETM (not duplicate the test logic).
+
+#### PHASE 8 — Track work + record results in ELM as you build
+**ELM stays the source of truth throughout coding, not just at design time.**
+
+- As you start a task: `transition_work_item(workitem_url, "In Development")`.
+- When a task is complete: `transition_work_item(workitem_url, "Resolved")`.
+- For each test case once the implementation is in place:
+  - If the code makes it pass → `create_test_result(test_case_url, status="passed")`.
+  - If the code can't satisfy it → `create_test_result(test_case_url, status="failed")` AND quick-interview the user about the failure, then `create_defect` linked to the requirement + test case URLs.
+
+#### PHASE 9 — Final summary
+Give the user a complete picture:
+
+> *"Build complete. End state:*
+> *- DNG: [Module name](url) — N reqs ({M} Approved, {K} Rejected)*
+> *- EWM: {N} tasks total — {M} Resolved, {K} still In Progress, {J} blocked*
+> *- ETM: {N} tests — {M} passed ✅, {K} failed ❌, {J} blocked*
+> *- Defects: [open defect list](query-url) — {N} open, all linked back to the requirements they affect*
+> *- Code: {F} files written, every file has 'Implements REQ-…' headers tying it back to ELM*
+>
+> *The complete trace is in ELM: requirement → task → test → result → defect-if-any. Click any link above to inspect."*
+
+#### Anti-patterns to avoid in build-project
+- ❌ Skipping the Phase 5 review pause and barreling into code generation
+- ❌ Writing code based on the in-memory artifacts from Phases 2–4 instead of the re-pulled state in Phase 6
+- ❌ Forgetting to filter for `Status=Approved` in Phase 6 — drives the wrong code
+- ❌ Forgetting to transition tasks during Phase 7/8 — leaves ELM out of sync with what's actually built
+- ❌ Hiding URLs behind a generic `/rm` link — every artifact gets a markdown-link surface
 
 ### After Any Path
 Ask: "Want to do anything else? I can read from another module, generate more requirements (single-tier or tiered), create tasks or test cases, or switch projects."

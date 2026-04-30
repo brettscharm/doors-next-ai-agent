@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -372,6 +372,46 @@ async def list_prompts() -> list[Prompt]:
             ],
         ),
         Prompt(
+            name="build-project",
+            description=(
+                "End-to-end agentic project build with IBM ELM as the system "
+                "of record. The AI runs a full sequence: project intake → "
+                "requirements (DNG) → work items (EWM) → test cases (ETM) → "
+                "user-review pause → re-pull current ELM state → write the "
+                "actual code (in the user's IDE) → transition work items + "
+                "record test results as work progresses. Every artifact is "
+                "cross-linked, every URL surfaced as a clickable link, every "
+                "phase has an explicit user-approval gate."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="project_idea",
+                    description="One-line description of what to build (e.g. 'a temperature converter web app', 'a fleet maintenance scheduling service')",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="dng_project",
+                    description="DNG project name (where requirements/modules will be created). Optional — AI will ask if not provided.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="ewm_project",
+                    description="EWM project name (where work items will be created). Optional.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="etm_project",
+                    description="ETM project name (where test cases will be created). Optional.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="tier_mode",
+                    description="'single' (one module of System Requirements) or 'tiered' (Business→Stakeholder→System in 3 modules with Satisfies links). Default: single.",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
             name="review-requirements",
             description=(
                 "Read requirements from a DNG module and review them for quality: "
@@ -472,6 +512,143 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
                 f"4. Present in a preview table\n"
                 f"5. Wait for my approval before pushing to DNG\n"
                 f"6. After creation, offer to create a baseline snapshot"
+            )),
+        )]
+
+    elif name == "build-project":
+        idea = args.get("project_idea", "")
+        dng = args.get("dng_project", "")
+        ewm = args.get("ewm_project", "")
+        etm = args.get("etm_project", "")
+        tier_mode = (args.get("tier_mode", "") or "single").lower()
+        proj_lines = []
+        if dng: proj_lines.append(f"DNG project: {dng}")
+        if ewm: proj_lines.append(f"EWM project: {ewm}")
+        if etm: proj_lines.append(f"ETM project: {etm}")
+        proj_block = "\n".join(proj_lines) if proj_lines else "Ask me which projects to use for each domain if not obvious."
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"# Build a project end-to-end with ELM as the system of record\n\n"
+                f"**Project idea:** {idea}\n\n"
+                f"{proj_block}\n\n"
+                f"**Tier mode:** {tier_mode} "
+                f"({'Business → Stakeholder → System in 3 modules with Satisfies links' if tier_mode == 'tiered' else 'one System Requirements module'})\n\n"
+                f"You are the agent driving an end-to-end agentic-development "
+                f"workflow. The full sequence is below. **Each phase has an "
+                f"explicit user-approval gate. Never skip a gate. Never push "
+                f"without preview. Surface every artifact URL as a clickable "
+                f"markdown link — never paraphrase to a /rm landing page.**\n\n"
+                f"---\n\n"
+                f"## PHASE 0 — Verify connection and project access\n"
+                f"Call `connect_to_elm` (if not connected). Confirm with me which "
+                f"DNG / EWM / ETM projects to use; offer `list_projects` if I "
+                f"don't know.\n\n"
+                f"## PHASE 1 — Project intake (interview)\n"
+                f"Confirm the project idea by asking 4–6 quick questions:\n"
+                f"- What's the user-facing description (one paragraph)?\n"
+                f"- Tech stack / platform constraints (web app? embedded? service?)\n"
+                f"- Standards or compliance (DO-178C, ISO 26262, NIST, none, etc.)\n"
+                f"- Approximate scale (5–10 reqs / 20+ reqs / massive)\n"
+                f"- Integrations or external interfaces?\n"
+                f"- Anything specific I MUST or MUST NOT include?\n\n"
+                f"Confirm a one-line scope summary back to me before moving on.\n\n"
+                f"## PHASE 2 — Requirements (DNG)\n"
+                f"Run **Step 3b** (single-tier) or **Step 3g** (tiered) per the "
+                f"`tier_mode` argument above. For each tier in tiered mode:\n"
+                f"  • Generate requirements internally\n"
+                f"  • Show a preview table grouped by proposed module with "
+                f"rationale per group\n"
+                f"  • Wait for my explicit 'yes' / 'go ahead'\n"
+                f"  • Push via `create_requirements` with `module_name` set "
+                f"(auto-binds to the module)\n"
+                f"  • Surface direct module + requirement URLs as markdown links\n\n"
+                f"**Server-side validation will reject** requirement bodies "
+                f"containing 'Acceptance Criteria', 'Business Value', "
+                f"'Stakeholder Need', 'Test Steps', etc. — those go in test "
+                f"cases (or in a separate StR/BR tier). Each requirement body "
+                f"must be a clean 'shall' statement with optional 'Rationale:' "
+                f"line.\n\n"
+                f"## PHASE 3 — Implementation tasks (EWM)\n"
+                f"Run **Step 3d**. Once Phase 2 is approved + pushed, generate "
+                f"one EWM Task per System Requirement (the lowest tier). "
+                f"Verb-first titles. Brief body — no copy of the requirement "
+                f"text (it's linked). Preview → my approval → push with "
+                f"`requirement_url` for every task.\n\n"
+                f"## PHASE 4 — Test cases (ETM)\n"
+                f"Run **Step 3e**. Same as tasks but generating Test Cases "
+                f"with full preconditions / steps / pass-fail. Preview → "
+                f"approval → push linked to each requirement via "
+                f"`requirement_url`.\n\n"
+                f"## PHASE 5 — Hand-off pause\n"
+                f"**STOP HERE. Do not write any code.** Tell me:\n\n"
+                f"  > 'Phase 2–4 complete. Open ELM and review:\n"
+                f"  >   • DNG: <module markdown links>\n"
+                f"  >   • EWM: <task list — links>\n"
+                f"  >   • ETM: <test case list — links>\n"
+                f"  > In ELM you can:\n"
+                f"  >   - approve / reject / modify any requirement\n"
+                f"  >   - mark requirements 'Approved' (only Approved reqs "
+                f"will drive the code in Phase 6)\n"
+                f"  >   - reassign tasks, change priorities\n"
+                f"  >   - rewrite test cases\n"
+                f"  > When you're ready, come back and say *continue* / "
+                f"*build it* / *pull latest*. I'll re-fetch everything from "
+                f"ELM (current state, not what we generated) and start "
+                f"writing the actual app code.'\n\n"
+                f"Then **wait silently for me to come back**. Do not poll, "
+                f"do not generate code, do not move on.\n\n"
+                f"## PHASE 6 — Re-pull and confirm scope\n"
+                f"When I say 'continue':\n\n"
+                f"1. Re-fetch the requirements module(s) using "
+                f"`get_module_requirements` with `filter={{\"Status\": \"Approved\"}}` "
+                f"(or whatever this project's approved-state value is — discover "
+                f"via `get_attribute_definitions` first; never guess).\n"
+                f"2. Re-fetch linked work items via `query_work_items` "
+                f"(filter to active iterations, exclude any moved out of scope).\n"
+                f"3. Re-fetch test cases for the same requirements.\n"
+                f"4. Show me the current state as a summary table:\n"
+                f"   • {{X}} approved requirements (down from {{Y}} originally — "
+                f"these were rejected/dropped)\n"
+                f"   • {{N}} active tasks\n"
+                f"   • {{M}} test cases\n"
+                f"5. Confirm: 'Building based on this current state. OK?'\n\n"
+                f"## PHASE 7 — Write the code\n"
+                f"Once I approve the current state in Phase 6, write the actual "
+                f"application code in my IDE. For each file you write, "
+                f"include a comment block linking back to the source "
+                f"requirement IDs (e.g. `# Implements REQ-005, REQ-007`). The "
+                f"code structure should mirror the requirement structure — "
+                f"each module / class / function should map to one or more "
+                f"reqs.\n\n"
+                f"**During coding, after each task is implemented:**\n"
+                f"- Call `transition_work_item` to move the task from "
+                f"'New' → 'In Development' → 'Resolved'\n"
+                f"- For each requirement implemented, you can also call "
+                f"`update_requirement_attributes` to record implementation "
+                f"status if the project has such an attribute\n\n"
+                f"## PHASE 8 — Run tests, record results, file defects on failure\n"
+                f"Once code is in place, walk the test cases:\n"
+                f"- For each test case that passes the implementation: call "
+                f"`create_test_result(test_case_url, status='passed')`\n"
+                f"- For each that fails: call `create_test_result(... status='failed')` "
+                f"AND interview me briefly to capture the failure (steps, expected "
+                f"vs actual, severity), then call `create_defect` linked to "
+                f"both the requirement and the test case URL.\n\n"
+                f"## PHASE 9 — Final summary\n"
+                f"Give me an end-of-build summary with markdown links:\n\n"
+                f"  • DNG: [Module name](url) — N reqs (M Approved, K Rejected)\n"
+                f"  • EWM: [task list](query-url) — N tasks (M Resolved, K In Progress)\n"
+                f"  • ETM: [test results](query-url) — M passed, K failed, J blocked\n"
+                f"  • Defects: [open defect list](query-url) — N open\n"
+                f"  • Code: list of files written, each with a 'Implements REQ-…' header\n\n"
+                f"---\n\n"
+                f"**REMEMBER:** the WRITE GATE rule applies to every create_* "
+                f"and update_* and transition_* tool call. Never skip the "
+                f"interview-preview-confirm gates. The user's approval is "
+                f"per-phase, not session-wide.\n\n"
+                f"Ready? Call `connect_to_elm` (if needed) and start Phase 0."
             )),
         )]
 
