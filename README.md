@@ -297,6 +297,24 @@ elm-mcp/
 
 ---
 
+## Share with your team
+
+Copy-paste-ready blurb for Slack, email, or Teams:
+
+> 🤖 **ELM MCP** — drive IBM DOORS Next, EWM, and ETM from any AI assistant (IBM Bob, Claude Code, Cursor, etc.) instead of clicking around the web UI.
+>
+> Install in 30 seconds — open a terminal:
+> ```
+> curl -fsSL https://raw.githubusercontent.com/brettscharm/elm-mcp/main/install.sh | bash
+> ```
+> Restart your AI assistant, then ask it: *"Connect to ELM and list my projects."*
+>
+> 36 tools: read/write requirements (with rich text + tables + images), create modules with auto-bound requirements, transition work items, query and update across DNG/EWM/ETM, generate charts. Full details: https://github.com/brettscharm/elm-mcp
+>
+> ⚠️ Personal passion project — NOT an official IBM tool. Use at your own risk. Free for community use.
+
+---
+
 ## Contributing / Issues
 
 - GitHub issues: https://github.com/brettscharm/elm-mcp/issues
