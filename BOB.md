@@ -409,95 +409,149 @@ When the user asks to compare baselines or see what changed:
 
 ### Step 3d: CREATE TASKS Path (EWM)
 
-When the user wants to create EWM tasks from requirements:
+Same flow as Step 3b: **interview → generate-internally → preview-with-structure → confirm → push.** Don't call any create_task until the user explicitly approves the preview.
 
-**Phase 1: Gather source requirements**
+**Phase 1: Light interview (one question at a time)**
 
-1. If the user hasn't already read requirements, guide them through Step 3a first to get requirement URLs
-2. **Check requirement status** — look at the `status` field on each requirement. If `status` is empty, check `custom_attributes` for status-like fields. If ANY requirements are NOT Approved, warn the user:
-   > "Heads up — X of these requirements are not Approved yet. Proceed anyway?"
-   Only proceed after explicit confirmation.
-3. Ask: "Which EWM project should I create the tasks in?" If the user doesn't know, call `list_projects` with `domain=ewm` to show them the options.
+1. **Source requirements** — If the user hasn't already read or generated them, guide through Step 3a (read) or Step 3b (generate) first. You need the requirement URLs in hand before you can link tasks back to them.
 
-**Phase 2: Generate and preview tasks**
+2. **Status check** — Inspect the `status` / `custom_attributes` of each source requirement. If ANY are NOT Approved, warn:
+   > "Heads up — X of these [N] requirements aren't Approved yet (status: [Draft/Proposed/etc.]). Tasks generated from unapproved reqs may need to change later. Proceed anyway, or wait?"
+   Only proceed on explicit "proceed."
 
-1. For each source requirement, generate a Task with:
-   - **Title**: actionable implementation task derived from the requirement (verb-first: "Implement...", "Design...", "Configure...")
-   - **Description** must include:
-     - **Objective**: What this task accomplishes and why
-     - **Acceptance criteria**: Copied directly from the source requirement's measurable criteria
-     - **Verification method**: How to confirm the task is done (code review, test, demo, inspection)
-     - **Dependencies**: Any prerequisite tasks or external dependencies
-   - `requirement_url` set to the source requirement's URL (from `get_module_requirements` output)
-2. **Present in a clean table:**
+3. **Project + iteration** — *"Which EWM project? Any specific iteration / sprint to plan these into, or leave unscheduled for the project lead?"* If the user doesn't know the EWM project, call `list_projects(domain="ewm")`.
 
-   > Here are the **X tasks** I'd create in EWM project [project name]:
+4. **Task granularity** — *"One task per requirement, or do you want me to break some requirements into multiple smaller tasks (UI work + back-end work + testing-prep, for example)? Default: one-to-one."*
+
+**Phase 2: Generate the tasks internally**
+
+Generate them silently. For each task:
+- **Title**: verb-first action (`Implement ...`, `Design ...`, `Configure ...`, `Refactor ...`). Concise — under 80 chars.
+- **Description**: brief — Objective (1 line: what this accomplishes) + Deliverables (bullet list of concrete outputs) + Dependencies (other tasks / external blockers, if any). **Don't copy the requirement's body in here** — it's already linked via `requirement_url`. Anyone reading the task in EWM can click through to the source.
+- **`requirement_url`**: set to the source requirement's URL (verbatim — see Phase 3 critical-rule below).
+
+Think about grouping:
+- All tasks one-to-one with reqs? Standard case.
+- Some reqs need breaking down? Show the breakdown in the preview so the user can sanity-check.
+- Cross-cutting work (shared logging, shared error-handling)? Propose a separate "Foundation" group of tasks not linked to a single req — surface that explicitly in the preview.
+
+**Phase 3: Preview with structure — STOP here**
+
+Show everything in one shot before any tool call:
+
+> Here are the **[N] tasks** I'd create in EWM project **[project name]**:
+>
+> *(Optional grouping if not 1-to-1 with reqs)*
+> ## Group 1: Implementation tasks ([n₁] tasks — one per requirement)
+>
+> | # | Task Title | Source Requirement | Dependencies |
+> |---|------------|-------------------|--------------|
+> | 1 | Implement battery backup activation logic | [REQ-001: Power Management](https://server/rm/resources/TX_xxx) | none |
+> | 2 | Build operator alert UI for low-battery state | [REQ-002: Low-battery Alert](https://server/rm/resources/TX_yyy) | task #1 |
+> | ... | ... | ... | ... |
+>
+> ## Group 2: Cross-cutting (optional — only if needed)
+>
+> | # | Task Title | Source | Notes |
+> | ... | ... | ... | ... |
+>
+> **Now decide:**
+> 1. **Approve as proposed** — reply "yes" / "go ahead" / "ship them".
+> 2. **Restructure** — tell me what to change: rename, drop a task, add a task, change dependencies, regroup, change which req a task links to.
+>
+> Note: I'm linking each task to its source requirement via `oslc_cm:implementsRequirement` — that's what makes traceability work. I'm not copying the requirement text into each task body.
+
+**Phase 4: Push, verify links, summarize**
+
+Once explicitly approved:
+
+1. Call `create_task` for each task with `ewm_project`, `title`, `description`, **AND `requirement_url`** (verbatim — copy from the source requirement's `url` field). One task per call. **CRITICAL — never skip `requirement_url`.** Without it the task is created but unlinked.
+
+2. After all tasks are created, verify linking on at least one task: re-fetch its URL and check for `oslc_cm:implementsRequirement` (or the reified `rdf:object` form). If any task came back unlinked, fix it: `create_link` with `link_type_uri="http://open-services.net/ns/cm#implementsRequirement"`, `source_url=<task URL>`, `target_url=<requirement URL>`.
+
+3. Summarize using direct markdown links:
+   > "Done — created [N] tasks in EWM project [project name]:
+   > - [Implement battery backup activation logic](task-direct-url) → linked to [REQ-001](req-url)
+   > - [Build operator alert UI ...](task-direct-url) → linked to [REQ-002](req-url)
+   > - ...
    >
-   > | # | Task Title | Linked Requirement | Acceptance Criteria | Verification |
-   > |---|-----------|-------------------|---------------------|--------------|
-   > | 1 | Implement battery backup subsystem | REQ-001: Power Management | Backup activates within 5s, sustains 4h | Integration test |
-   > | ... | ... | ... | ... | ... |
-   >
-   > **Each task will be linked to its source requirement. Want me to push these to EWM?**
-
-3. Only after explicit confirmation → call `create_task` for each task with `ewm_project`, `title`, `description`, **AND `requirement_url`**.
-
-   **CRITICAL — `requirement_url` is what creates the link.** Pass it verbatim — copy the URL from the `url` field of each requirement in the previous `create_requirements` or `get_module_requirements` output. Do NOT paraphrase, do NOT use the requirement's friendly ID — use the literal `https://server/rm/resources/TX_xxx` URL. Without this field, the task is created but unlinked, and traceability breaks. **If you're creating N tasks for N requirements, you must pass N different `requirement_url` values, one per task.**
-
-4. After all tasks are created, verify the linking worked: pick one task URL from the response and re-fetch it (the response should include `oslc_cm:implementsRequirement` pointing at the requirement). If any task came back without the link, fix it by calling `create_link` with `link_type_uri="http://open-services.net/ns/cm#implementsRequirement"`, `source_url=<task URL>`, `target_url=<requirement URL>`.
-
-**Phase 3: Confirm delivery**
-
-Tell the user:
-> "Done! I created X tasks in EWM project '[project name]'. Each task is linked to its source requirement in DNG. A project lead can assign them to iterations and developers."
+   > Want me to:
+   > 1. **Generate the matching ETM Test Cases** for the same requirements?
+   > 2. **Transition any of these to 'In Progress'** as you start work?
+   > 3. **Skip for now**."
 
 ### Step 3e: CREATE TEST CASES Path (ETM)
-When the user wants to create ETM test cases from requirements:
 
-**Phase 1: Gather source requirements**
+Same shape as Step 3d: **interview → generate-internally → preview-with-structure → confirm → push.** Test cases are the right place for acceptance criteria, test steps, and pass/fail conditions — that's what makes them ETM artifacts vs DNG requirements.
 
-1. If the user hasn't already read requirements, guide them through Step 3a first to get requirement URLs
-2. **Check requirement status** — same as Step 3d: look at the `status` field, check `custom_attributes` if empty. Warn if any are not Approved.
-3. Ask: "Which ETM project should I create the test cases in?" If the user doesn't know, call `list_projects` with `domain=etm` to show them the options.
+**Phase 1: Light interview**
 
-**Phase 2: Generate and preview test cases**
+1. **Source requirements** — Same as Step 3d. Need URLs in hand.
 
-1. For each source requirement, generate a Test Case with:
-   - **Title**: verification-oriented phrasing ("Verify...", "Validate...", "Confirm...")
-   - **Description** must include structured test procedure:
-     - **Preconditions**: Required system state, test environment, and setup
-     - **Test Steps**: Numbered, specific, reproducible actions (not vague — include exact values, inputs, and sequences)
-     - **Expected Results**: Measurable outcomes for each step tied directly to the requirement's acceptance criteria
-     - **Pass/Fail Criteria**: Explicit conditions for pass and fail (e.g., "PASS if backup activates in <=5 seconds; FAIL if >5 seconds or no activation")
-   - `requirement_url` set to the source requirement's URL (from `get_module_requirements` output)
-2. **Present in a clean table:**
+2. **Status check** — Same warning if any are not Approved.
 
-   > Here are the **X test cases** I'd create in ETM project [project name]:
+3. **Project** — Which ETM project? If unknown, `list_projects(domain="etm")`.
+
+4. **Test depth** — *"For each requirement, do you want:*
+   > *- A single high-level test case (one verification per req — fastest)?*
+   > *- Multiple test cases per requirement (happy path + edge cases + error paths)?*
+   > *- High-level test cases now, with detailed Test Scripts attached separately for each (richer; takes longer but more rigorous)?"*
+
+5. **Test types** — *"Mostly functional tests, or also performance / security / accessibility / regression?"*
+
+**Phase 2: Generate internally**
+
+For each test case:
+- **Title**: verification-oriented (`Verify ...`, `Validate ...`, `Confirm ...`). Concise.
+- **Description**: structured test procedure with these sections (these DO belong in test cases — that's their purpose):
+  - **Preconditions**: required system state, test data, environment.
+  - **Test Steps**: numbered, specific, reproducible. Each step has the action and the expected result.
+  - **Pass/Fail Criteria**: explicit, measurable conditions.
+- **`requirement_url`**: source requirement URL.
+
+If user picked "high-level + scripts": generate both. The script holds the detailed numbered procedure; the test case is the "what to verify" header that the script executes via `oslc_qm:executesTestScript`.
+
+**Phase 3: Preview with structure — STOP here**
+
+> Here are the **[N] test cases** I'd create in ETM project **[project name]** (validating [M] requirements):
+>
+> | # | Test Case Title | Validates Requirement | Pass/Fail (1-line summary) |
+> |---|----------------|----------------------|----------------------------|
+> | 1 | Verify backup activates within 5s | [REQ-001](req-url) | PASS: active ≤5s, FAIL: >5s |
+> | 2 | Verify low-battery alert at 20% | [REQ-002](req-url) | PASS: alert + log timestamped, FAIL: no alert |
+> | ... | ... | ... | ... |
+>
+> **Test Scripts** (only shown if user asked for them):
+>
+> | # | Test Script Title | Drives Test Case | # Steps |
+> | ... | ... | ... | ... |
+>
+> **Now decide:**
+> 1. **Approve as proposed** — reply "yes" / "go ahead" / "ship them".
+> 2. **Restructure** — tell me what to change: drop tests, add tests, split one test into multiple, change preconditions, change pass/fail wording.
+
+**Phase 4: Push, verify links, summarize**
+
+1. Call `create_test_case` for each — pass `etm_project`, `title`, `description`, **AND `requirement_url`** verbatim. Same rule as tasks: never skip `requirement_url`.
+
+2. If user wanted scripts: for each test case URL just returned, call `create_test_script` with `etm_project`, `title`, `steps`, `test_case_url`.
+
+3. Verify linking: re-fetch one test case, confirm `oslc_qm:validatesRequirement` points at the source. If missing, fix with `create_link` (`link_type_uri="http://open-services.net/ns/qm#validatesRequirement"`).
+
+4. Summarize with direct links:
+   > "Done — created [N] test cases (and [M] scripts, if applicable) in [project name]:
+   > - [Verify backup activates within 5s](test-case-url) ← validates [REQ-001](req-url)
+   > - ...
    >
-   > | # | Test Case Title | Validates Requirement | Preconditions | Test Steps | Pass/Fail Criteria |
-   > |---|----------------|----------------------|---------------|------------|-------------------|
-   > | 1 | Verify power backup activates within 5 seconds | REQ-001: Power Management | System at normal operation, backup fully charged | 1. Remove primary power 2. Start timer 3. Observe backup activation 4. Verify system operation for 60s | PASS: backup active <=5s, system operational. FAIL: >5s or system interruption |
-   > | ... | ... | ... | ... | ... | ... |
-   >
-   > **Each test case will be linked to its source requirement. Want me to push these to ETM?**
+   > Want me to:
+   > 1. **Run any of these now** — pass them and record a Test Result?
+   > 2. **Block any of them** as Not-Yet-Implemented (record Test Result status='blocked')?
+   > 3. **Skip for now**."
 
-3. Only after explicit confirmation → call `create_test_case` for each with `etm_project`, `title`, `description`, **AND `requirement_url`**.
+If user picks 1 → call `create_test_result(test_case_url, status='passed')`.
+If user picks 2 → call `create_test_result(test_case_url, status='blocked')`.
 
-   **CRITICAL — `requirement_url` is what creates the link.** Pass it verbatim from the `url` field of each requirement in the previous `create_requirements` or `get_module_requirements` output. Same rules as for tasks: literal URL only (`https://server/rm/resources/TX_xxx`), one URL per test case, never skip this field when validating an existing requirement. Without it, the test case is created but unlinked — coverage reports won't show it validates anything.
-
-   After all test cases are created, verify by re-fetching one and confirming `oslc_qm:validatesRequirement` points at the requirement. If any came back without the link, fix it: call `create_link` with `link_type_uri="http://open-services.net/ns/qm#validatesRequirement"`, `source_url=<test case URL>`, `target_url=<requirement URL>`.
-
-**Phase 3: Record test results (optional)**
-
-After creating test cases, ask:
-> "Would you like me to record test results for any of these test cases? I can mark them as passed, failed, blocked, incomplete, or error."
-
-If yes → call `create_test_result` for each with `etm_project`, `test_case_url` (from `create_test_case` output), and `status` (as specified by the user).
-
-**Phase 4: Confirm delivery**
-
-Tell the user:
-> "Done! I created X test cases in ETM project '[project name]'. Each test case validates its source requirement in DNG. Review them in ETM and approve the test plan."
+**Defects:** if a user comes back later and says a test failed, run a separate quick interview ("describe what failed, expected vs actual, severity?") then call `create_defect` linked to the requirement. The flow is the same: interview → preview → confirm → push.
 
 ### Step 3f: FULL LIFECYCLE Path
 When the user wants the full lifecycle (Requirements → Tasks → Test Cases):
