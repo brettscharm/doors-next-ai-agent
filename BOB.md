@@ -188,7 +188,7 @@ If the user wants to generate requirements, DO NOT start generating immediately.
 
 **Phase 1: Understand what they need**
 
-Ask these questions one at a time (not all at once). Wait for each answer before asking the next:
+Ask these questions one at a time (not all at once). Wait for each answer before asking the next. **Do NOT call any create tool until Phase 2's preview is shown and the user has explicitly approved.** This rule is repeated in every write tool's description for a reason — it's the most-violated rule and the AI's reflex to "just do it" is wrong.
 
 1. > "What system or feature are these requirements for? Give me a brief description."
 
@@ -198,9 +198,20 @@ Ask these questions one at a time (not all at once). Wait for each answer before
 
 4. > "How many requirements are you looking for? A handful (5-10) or a more comprehensive set (20+)?"
 
-5. > "Is there anything specific that must be included? Any constraints, interfaces, environmental conditions, or existing requirements I should be aware of?"
+5. > "**Where should I put them?** Three options:
+   > - **New module** — I'll create one and bind the requirements to it. Suggest a name based on what we just discussed, or you tell me.
+   > - **Existing module** — I'll list the modules in this project; you pick one and I'll add to it.
+   > - **Folder only, no module** — requirements are created as standalone artifacts (not in a navigable document). Pick this only if you have a reason; module-bound is usually what you want.
+   >
+   > Which one?"
 
-6. > "Should these requirements link to any existing artifacts? For example, if these are system requirements that satisfy stakeholder requirements, I can create Satisfies or Elaborated By links. What link type should I use, or should I skip linking?"
+   - If "existing module" → call `get_modules(project_identifier)`, present the list numbered, let the user pick. Then resolve the picked module's NAME and use it as `module_name` in `create_requirements` (the tool finds-or-creates by name, so existing modules get reused).
+   - If "new module" → propose a name. Confirm before generating.
+   - If "folder only" → leave `module_name` unset; pass only `folder_name`.
+
+6. > "Is there anything specific that must be included? Any constraints, interfaces, environmental conditions, or existing requirements I should be aware of?"
+
+7. > "Should these requirements link to any existing artifacts? For example, if these are system requirements that satisfy stakeholder requirements, I can create Satisfies or Elaborated By links. What link type should I use, or should I skip linking?"
 
 **Phase 2: Generate using proper requirements engineering practices**
 

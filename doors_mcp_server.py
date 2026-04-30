@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -633,6 +633,24 @@ async def read_resource(uri: str) -> str:
 
 # ── Tool Definitions ──────────────────────────────────────────
 
+# Prepended to every write tool's description so the AI sees the gate
+# rule on every tool call, not just at session start. Important: this is
+# the most-violated rule. The AI tends to treat "the user mentioned X"
+# as consent to create X — it isn't. The user's first message is a
+# request; consent only comes from a preview + explicit "yes".
+_WRITE_GATE = (
+    "🛑 WRITE GATE — DO NOT CALL THIS TOOL until you have: "
+    "(1) asked the user clarifying questions about what to create or change; "
+    "(2) shown a preview table of EXACTLY what will be written; "
+    "(3) received an explicit confirmation like 'yes' / 'go ahead' / 'ship it' / "
+    "'push them' / 'do it'. "
+    "The user merely mentioning the artifact type ('I want some requirements', "
+    "'create a task') is a REQUEST, not approval — interview first. "
+    "If you call this tool without all three steps you are violating the "
+    "project's stated rules in BOB.md. — "
+)
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
@@ -782,7 +800,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_module",
-            description=(
+            description=(_WRITE_GATE +
                 "Create a new DOORS Next module (a navigable document that holds requirements). "
                 "Use this when the user wants a fresh module to house requirements. "
                 "After creating the module, call create_requirements with module_name set "
@@ -809,7 +827,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_requirements",
-            description=(
+            description=(_WRITE_GATE +
                 "Create requirements in a DOORS Next project AND bind them to a module so they "
                 "appear in DNG's module/document view. STRONGLY PREFER providing module_name — "
                 "module_name is what makes requirements visible as a navigable document; folder-only "
@@ -926,7 +944,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_requirement",
-            description=(
+            description=(_WRITE_GATE +
                 "Update an existing requirement in DNG. "
                 "Provide the requirement URL (from get_module_requirements or create_requirements) "
                 "and the new title and/or content. Uses OSLC optimistic locking (ETag). "
@@ -953,7 +971,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_baseline",
-            description=(
+            description=(_WRITE_GATE +
                 "Create a baseline (immutable snapshot) of the current state of a DNG project. "
                 "Use this after importing requirements to freeze the state before making changes. "
                 "Baseline creation is async — the server processes it in the background."
@@ -1043,7 +1061,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_task",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an EWM Task work item. "
                 "**ALWAYS pass `requirement_url` when the task implements a DNG requirement** — "
                 "without it, the task is unlinked, traceability breaks, and reports "
@@ -1078,7 +1096,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_test_case",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an ETM Test Case. "
                 "**ALWAYS pass `requirement_url` when the test validates a DNG requirement** — "
                 "without it, the test case is unlinked and reports won't show what it "
@@ -1112,7 +1130,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_test_script",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an ETM Test Script — the actual test procedure (numbered "
                 "steps, expected results, pass/fail criteria). Test Cases say "
                 "*what* to verify; Test Scripts say *how* to verify it. Use this "
@@ -1146,7 +1164,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_test_result",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an ETM Test Result for a test case. "
                 "Records a pass/fail/blocked/incomplete/error result. "
                 "Requires the test case URL from create_test_case output."
@@ -1238,7 +1256,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="generate_chart",
-            description=(
+            description=(_WRITE_GATE +
                 "Generate a chart (bar, horizontal bar, pie, or line) from data and save it as a PNG. "
                 "Use this to visualize ELM data — e.g., requirements by status, test results pass/fail, "
                 "tasks by priority, requirements per module. The host LLM should aggregate the data first "
@@ -1307,7 +1325,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_requirement_attributes",
-            description=(
+            description=(_WRITE_GATE +
                 "Set arbitrary DNG attributes on a requirement (e.g. Priority='High', "
                 "Status='Approved'). Uses optimistic locking (GET ETag → PUT If-Match). "
                 "Pass attribute keys by friendly name OR full predicate URI. For enum-valued "
@@ -1336,7 +1354,7 @@ async def list_tools() -> list[Tool]:
         # ── EWM: work-item operations ──────────────────────────
         Tool(
             name="update_work_item",
-            description=(
+            description=(_WRITE_GATE +
                 "Update arbitrary fields on an EWM work item via PUT-with-If-Match. "
                 "Friendly aliases: title, description, owner (user URI), severity / priority "
                 "(enum URIs), subject (tag list), filedAgainst (category URI). "
@@ -1360,7 +1378,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="transition_work_item",
-            description=(
+            description=(_WRITE_GATE +
                 "Move an EWM work item through its workflow (e.g. New → In Development → Done). "
                 "Looks up the project's workflow actions and PUTs with `?_action=<actionId>`. "
                 "Pass `target_state` as a state title ('In Development', 'Done') or identifier. "
@@ -1417,7 +1435,7 @@ async def list_tools() -> list[Tool]:
         # ── Cross-domain link creation ─────────────────────────
         Tool(
             name="create_link",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an OSLC link between two artifacts that already exist. Use this "
                 "when the link wasn't created at artifact-creation time — e.g. linking an "
                 "existing EWM task to an existing DNG requirement after the fact. For "
@@ -1462,7 +1480,7 @@ async def list_tools() -> list[Tool]:
         # ── EWM: defect creation ───────────────────────────────
         Tool(
             name="create_defect",
-            description=(
+            description=(_WRITE_GATE +
                 "Create an EWM Defect work item. Resolves the project category for "
                 "`rtc_cm:filedAgainst` automatically (process rules typically reject the "
                 "Unassigned default — this tool picks the first concrete category). Severity "
