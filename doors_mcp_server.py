@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -178,8 +178,24 @@ def _auto_update_at_startup() -> None:
     if not _throttle_allows_check():
         return
     latest = _fetch_latest_version()
+    # Only record the check timestamp if the network call ACTUALLY
+    # succeeded. Previously we recorded unconditionally — meaning a
+    # transient network failure (or being offline at startup) would
+    # block the next 24h of update checks. Now: failed checks don't
+    # count, so the next start retries.
+    if latest is None:
+        sys.stderr.write(
+            f"[elm-mcp] v{__version__}: update check failed (network/GitHub "
+            f"unreachable). Will retry on next startup.\n"
+        )
+        sys.stderr.flush()
+        return
     _record_check_now()
-    if not latest or latest == __version__:
+    if latest == __version__:
+        sys.stderr.write(
+            f"[elm-mcp] v{__version__}: up to date.\n"
+        )
+        sys.stderr.flush()
         return
     # A newer version exists. Try to pull + re-exec.
     if _is_git_managed() and _git_pull():
@@ -195,10 +211,49 @@ def _auto_update_at_startup() -> None:
     # Couldn't auto-update (not a git checkout, e.g. installed via
     # Smithery as a frozen bundle). Surface a notice the next time
     # connect_to_elm runs so the user knows to update manually.
-    _update_notice = (
-        f"\n\n> ELM MCP v{latest} is available (you're on v{__version__}). "
-        f"Run: curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | bash"
+    sys.stderr.write(
+        f"[elm-mcp] v{__version__}: v{latest} is available — "
+        f"will surface notice on first tool call.\n"
     )
+    sys.stderr.flush()
+    _update_notice = (
+        f"\n\n> 🔔 **ELM MCP v{latest} is available** (you're on v{__version__}). "
+        f"To update: just say *\"update yourself\"* — that's a single tool "
+        f"call (no per-step prompts). Or for a fresh-machine reinstall: "
+        f"`curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | bash`"
+    )
+
+
+def _preflight_version_block() -> str:
+    """Quick GitHub version check used at the top of major orchestration
+    tools (build_project, build_new_project, build_from_existing). The
+    user asked for this — they want to know up-front whether they're
+    running the latest before kicking off a long workflow.
+
+    Returns a short markdown block to prepend to the response. Empty
+    string if up to date or check fails (don't block on slow network)."""
+    try:
+        latest = _fetch_latest_version()
+        if latest is None:
+            # Network failed — don't punish the user, just continue silently.
+            return ""
+        if latest == __version__:
+            return (
+                f"> ✅ Running ELM MCP **v{__version__}** (latest).\n\n"
+            )
+        # Outdated — surface clearly with the one-tool update path.
+        return (
+            f"> ⚠️ **Update available:** you're on ELM MCP v{__version__}, "
+            f"latest is **v{latest}**.\n>\n"
+            f"> The build flow has gotten meaningful improvements between "
+            f"versions. To update before continuing: just say "
+            f"*\"update yourself\"* — that's ONE tool call, no per-step "
+            f"prompts. Bob will pull v{latest} and tell you to restart.\n>\n"
+            f"> Or proceed with v{__version__} now — your choice. "
+            f"Either is fine; the warning won't repeat.\n\n"
+        )
+    except Exception:
+        return ""
 
 
 def _maybe_append_update_notice(text: str) -> str:
@@ -227,6 +282,112 @@ _folder_cache: Dict[str, Dict] = {}           # folder_name -> {title, url}
 
 
 _client_error: str = ""
+
+
+# ── Build-project run state ───────────────────────────────────
+# In-memory dict keyed by run_id. Each entry is the full state of one
+# /build-project (or /build-new-project / /build-from-existing) run.
+# Lives only as long as the MCP server process; if Bob restarts, state
+# is lost and the user starts a new run. That's acceptable for v0.1.14;
+# disk persistence can come later if needed.
+#
+# Schema:
+#   {
+#     "run_id": "<short uuid>",
+#     "command": "build-new-project" | "build-from-existing",
+#     "started_at": "<iso>",
+#     "last_updated_at": "<iso>",
+#     "current_phase": int,
+#     "tier_mode": "single" | "tiered",
+#     "project_idea": str,
+#     "project_urls": {"dng": str, "ewm": str, "etm": str},
+#     "approved_state_value": str,  # discovered at Phase 6 prep
+#     "artifacts": {
+#       "modules":      [{"url", "title", "created_at"}],
+#       "requirements": [{"url", "title", "created_at", "modified_at"}],
+#       "tasks":        [{"url", "title", "created_at", "modified_at"}],
+#       "tests":        [{"url", "title", "created_at", "modified_at"}],
+#       "child_workitems": [...]
+#     },
+#     "approval_signals": {<phase>: <verbatim user reply>},
+#     "drift": null | {"unchanged": int, "modified": [...], "deleted": [...], "added_externally": [...]}
+#   }
+_RUNS: Dict[str, Dict] = {}
+
+
+def _new_run(command: str, project_idea: str = "",
+             tier_mode: str = "single", project_urls: Optional[Dict] = None) -> Dict:
+    """Create a new build-project run and register it. Returns the new
+    run dict (caller can mutate; changes persist in _RUNS by reference)."""
+    import uuid as _uuid
+    import datetime as _dt
+    run_id = _uuid.uuid4().hex[:10]
+    now = _dt.datetime.utcnow().isoformat() + "Z"
+    run = {
+        "run_id": run_id,
+        "command": command,
+        "started_at": now,
+        "last_updated_at": now,
+        "current_phase": 0,
+        "tier_mode": tier_mode,
+        "project_idea": project_idea,
+        "project_urls": project_urls or {},
+        "approved_state_value": "",
+        "artifacts": {
+            "modules": [],
+            "requirements": [],
+            "tasks": [],
+            "tests": [],
+            "child_workitems": [],
+        },
+        "approval_signals": {},
+        "drift": None,
+    }
+    _RUNS[run_id] = run
+    return run
+
+
+def _get_run(run_id: str) -> Optional[Dict]:
+    """Look up a run by id. Returns None if unknown."""
+    return _RUNS.get(run_id) if run_id else None
+
+
+def _touch_run(run: Dict) -> None:
+    """Update last_updated_at on the run."""
+    import datetime as _dt
+    run["last_updated_at"] = _dt.datetime.utcnow().isoformat() + "Z"
+
+
+def _record_artifact_in_run(run: Dict, kind: str, url: str, title: str,
+                             modified_at: str = "") -> None:
+    """Append an artifact to the run's artifacts dict. kind is one of
+    modules / requirements / tasks / tests / child_workitems."""
+    import datetime as _dt
+    if kind not in run["artifacts"]:
+        run["artifacts"][kind] = []
+    now = _dt.datetime.utcnow().isoformat() + "Z"
+    run["artifacts"][kind].append({
+        "url": url,
+        "title": title,
+        "created_at": now,
+        "modified_at": modified_at or now,
+    })
+    _touch_run(run)
+
+
+def _list_active_runs() -> List[Dict]:
+    """Return a summary list of all active runs (for resume / status)."""
+    return [
+        {
+            "run_id": r["run_id"],
+            "command": r.get("command", "unknown"),
+            "phase": r.get("current_phase", 0),
+            "idea": r.get("project_idea", "")[:80],
+            "started_at": r.get("started_at", ""),
+            "last_updated_at": r.get("last_updated_at", ""),
+        }
+        for r in _RUNS.values()
+    ]
 
 
 def _get_or_create_client() -> Optional[DOORSNextClient]:
@@ -453,41 +614,54 @@ async def list_prompts() -> list[Prompt]:
         Prompt(
             name="build-project",
             description=(
-                "End-to-end agentic project build with IBM ELM as the system "
-                "of record. The AI runs a full sequence: project intake → "
-                "requirements (DNG) → work items (EWM) → test cases (ETM) → "
-                "user-review pause → re-pull current ELM state → write the "
-                "actual code (in the user's IDE) → transition work items + "
-                "record test results as work progresses. Every artifact is "
-                "cross-linked, every URL surfaced as a clickable link, every "
-                "phase has an explicit user-approval gate."
+                "Legacy alias for /build-new-project (greenfield flow). Kept for "
+                "backward compatibility. Prefer /build-new-project (greenfield) "
+                "or /build-from-existing (brownfield) explicitly."
             ),
             arguments=[
-                PromptArgument(
-                    name="project_idea",
-                    description="One-line description of what to build (e.g. 'a temperature converter web app', 'a fleet maintenance scheduling service')",
-                    required=True,
-                ),
-                PromptArgument(
-                    name="dng_project",
-                    description="DNG project name (where requirements/modules will be created). Optional — AI will ask if not provided.",
-                    required=False,
-                ),
-                PromptArgument(
-                    name="ewm_project",
-                    description="EWM project name (where work items will be created). Optional.",
-                    required=False,
-                ),
-                PromptArgument(
-                    name="etm_project",
-                    description="ETM project name (where test cases will be created). Optional.",
-                    required=False,
-                ),
-                PromptArgument(
-                    name="tier_mode",
-                    description="'single' (one module of System Requirements) or 'tiered' (Business→Stakeholder→System in 3 modules with Satisfies links). Default: single.",
-                    required=False,
-                ),
+                PromptArgument(name="project_idea", description="One-line description of what to build.", required=True),
+                PromptArgument(name="dng_project", description="DNG project name. Optional.", required=False),
+                PromptArgument(name="ewm_project", description="EWM project name. Optional.", required=False),
+                PromptArgument(name="etm_project", description="ETM project name. Optional.", required=False),
+                PromptArgument(name="tier_mode", description="'single' or 'tiered'. Default 'single'.", required=False),
+            ],
+        ),
+        Prompt(
+            name="build-new-project",
+            description=(
+                "Greenfield agentic build — start from a one-line idea, generate "
+                "fresh requirements/tasks/tests, write code, with phase-gated "
+                "user approvals. Use this when there's NO existing material to "
+                "import. Returns a run_id used by build_project_next, "
+                "build_project_status, and generate_traceability_matrix to "
+                "persist phase context (artifact URLs, tier_mode, drift state)."
+            ),
+            arguments=[
+                PromptArgument(name="project_idea", description="One-line description of what to build (e.g. 'a temperature converter web app').", required=True),
+                PromptArgument(name="dng_project", description="DNG project name. Optional — AI will ask.", required=False),
+                PromptArgument(name="ewm_project", description="EWM project name. Optional.", required=False),
+                PromptArgument(name="etm_project", description="ETM project name. Optional.", required=False),
+                PromptArgument(name="tier_mode", description="'single' (one System Requirements module) or 'tiered' (Business→Stakeholder→System).", required=False),
+            ],
+        ),
+        Prompt(
+            name="build-from-existing",
+            description=(
+                "Brownfield agentic build — start from existing material (a "
+                "Jira/work-item PDF, pasted requirements, an existing DNG "
+                "module URL) and continue from there. Phase 1 asks WHAT the "
+                "user has and routes to /import-work-item or /import-requirements "
+                "or just reads an existing module. Then converges with the "
+                "standard flow at Phase 5 (user review). Returns a run_id."
+            ),
+            arguments=[
+                PromptArgument(name="source_kind", description="'pdf' (work-item PDF), 'text' (paste), 'module' (existing DNG module URL), 'mixed', or '' (ask user).", required=False),
+                PromptArgument(name="source_path", description="PDF path or DNG module URL. Optional — AI will ask.", required=False),
+                PromptArgument(name="project_idea", description="Short summary. Optional — AI derives from source.", required=False),
+                PromptArgument(name="dng_project", description="DNG project name. Optional.", required=False),
+                PromptArgument(name="ewm_project", description="EWM project name. Optional.", required=False),
+                PromptArgument(name="etm_project", description="ETM project name. Optional.", required=False),
+                PromptArgument(name="tier_mode", description="'single' or 'tiered'. Default 'single'.", required=False),
             ],
         ),
         Prompt(
@@ -1089,6 +1263,118 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
             )),
         )]
 
+    elif name == "build-new-project":
+        idea = args.get("project_idea", "")
+        dng = args.get("dng_project", "")
+        ewm = args.get("ewm_project", "")
+        etm = args.get("etm_project", "")
+        tier_mode = (args.get("tier_mode", "") or "single").lower()
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"The user wants a GREENFIELD agentic build — start from a "
+                f"one-line idea, generate fresh requirements, tasks, tests, "
+                f"and code. Use the `build_new_project` TOOL (not the legacy "
+                f"build_project tool) so phase context persists via run_id.\n\n"
+                f"Call `build_new_project(project_idea=\"{idea}\""
+                + (f", dng_project=\"{dng}\"" if dng else "")
+                + (f", ewm_project=\"{ewm}\"" if ewm else "")
+                + (f", etm_project=\"{etm}\"" if etm else "")
+                + (f", tier_mode=\"{tier_mode}\"" if tier_mode else "")
+                + ").\n\n"
+                f"The tool returns a run_id and Phase 0+1 instructions. "
+                f"**Pass that run_id to every subsequent `build_project_next` "
+                f"call** so artifact URLs and tier_mode persist across phases.\n\n"
+                f"After each phase's user-approval moment, call "
+                f"`build_project_next(current_phase=N, user_signal=<verbatim "
+                f"user reply>, run_id=<the run_id>)`. The tool refuses to "
+                f"advance on empty / vague / non-approval signals. Never "
+                f"paraphrase the signal; pass the user's actual words.\n\n"
+                f"At Phase 9, call `generate_traceability_matrix(run_id=...)` "
+                f"to produce the deliverable matrix. Use "
+                f"`build_project_status(run_id=...)` anytime to inspect run "
+                f"state.\n\n"
+                f"Don't write code until Phase 7. Don't push to ELM without "
+                f"per-phase preview-and-approval. Surface every URL as a "
+                f"markdown link.\n\n"
+                f"Start now."
+            )),
+        )]
+
+    elif name == "build-from-existing":
+        source_kind = (args.get("source_kind", "") or "").lower().strip()
+        source_path = args.get("source_path", "")
+        idea = args.get("project_idea", "")
+        dng = args.get("dng_project", "")
+        ewm = args.get("ewm_project", "")
+        etm = args.get("etm_project", "")
+        tier_mode = (args.get("tier_mode", "") or "single").lower()
+
+        source_intro = ""
+        if source_kind == "pdf" and source_path:
+            source_intro = (
+                f"Source kind: **PDF** at `{source_path}`. After "
+                f"`build_from_existing` returns, invoke `/import-work-item` "
+                f"with that path to do the structured parsing, then capture "
+                f"the resulting EWM/DNG/ETM URLs into the run via "
+                f"`build_project_next` context.\n\n"
+            )
+        elif source_kind == "text":
+            source_intro = (
+                "Source kind: **pasted requirements text**. After "
+                "`build_from_existing` returns, invoke `/import-requirements` "
+                "to parse and push, then capture the resulting module + req "
+                "URLs into the run via `build_project_next` context.\n\n"
+            )
+        elif source_kind == "module" and source_path:
+            source_intro = (
+                f"Source kind: **existing DNG module** at `{source_path}`. "
+                f"After `build_from_existing` returns, call "
+                f"`get_module_requirements({source_path})` to read all reqs, "
+                f"capture the URLs into the run via `build_project_next` "
+                f"context, and skip Phase 2 (already exists).\n\n"
+            )
+        else:
+            source_intro = (
+                "Source kind not yet specified. In Phase 1, ask the user "
+                "*'What do you have as input — (a) a PDF of a work item, "
+                "(b) requirements pasted as text, (c) an existing DNG module "
+                "URL, or (d) a mix?'* Then route accordingly.\n\n"
+            )
+
+        args_block = (
+            (f"source_kind=\"{source_kind}\", " if source_kind else "")
+            + (f"source_path=\"{source_path}\", " if source_path else "")
+            + (f"project_idea=\"{idea}\", " if idea else "")
+            + (f"dng_project=\"{dng}\", " if dng else "")
+            + (f"ewm_project=\"{ewm}\", " if ewm else "")
+            + (f"etm_project=\"{etm}\", " if etm else "")
+            + (f"tier_mode=\"{tier_mode}\"" if tier_mode else "")
+        ).rstrip(", ")
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"The user wants a BROWNFIELD agentic build — start from "
+                f"existing material rather than a blank slate.\n\n"
+                f"{source_intro}"
+                f"Call `build_from_existing({args_block})`. The tool returns "
+                f"a run_id and Phase 0+1 instructions, including the "
+                f"branching logic for whichever source the user has.\n\n"
+                f"**Pass run_id to every `build_project_next` call.** Phase 1 "
+                f"differs from greenfield — it's an import phase rather than "
+                f"an interview phase. After import, the run converges with "
+                f"the standard flow at Phase 5 (user review).\n\n"
+                f"Phase 2 may be SKIPPED if the import created reqs already; "
+                f"Phase 3 / 4 may be skipped similarly if the import included "
+                f"tasks / tests. The Phase 6 drift detection works the same "
+                f"way regardless of source.\n\n"
+                f"Surface every URL as a markdown link. Don't write code "
+                f"until Phase 7. Use `build_project_status(run_id=...)` "
+                f"anytime to inspect."
+            )),
+        )]
+
     elif name == "review-requirements":
         project = args.get("project", "")
         module = args.get("module", "")
@@ -1324,14 +1610,18 @@ async def list_tools() -> list[Tool]:
                 "An empty or fake user_signal returns an error and the flow stalls "
                 "— that's the point. This is the lock that prevents Bob from "
                 "advancing phases without real user consent. Pass the user's "
-                "actual reply text, not a paraphrase."
+                "actual reply text, not a paraphrase. Pass `run_id` (returned by "
+                "build_project / build_new_project / build_from_existing) so the "
+                "tool can persist artifact URLs, tier_mode, etc. across phases — "
+                "without it, state survives only as long as your conversation "
+                "context."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "current_phase": {
                         "type": "integer",
-                        "description": "The phase number you JUST finished (0–8). build_project_next will return the instructions for phase current_phase + 1.",
+                        "description": "The phase number you JUST finished (0–8). build_project_next will return the instructions for phase current_phase + 1. Phase 7 advances to Phase 7.5 (code-review gate) before Phase 8.",
                         "minimum": 0,
                         "maximum": 8
                     },
@@ -1339,9 +1629,13 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "VERBATIM text of what the user typed in response to your phase preview. Must contain explicit approval ('yes' / 'go ahead' / 'approved' / 'ship it' / 'continue' / 'push them' / 'do it' / 'looks good'). The tool validates this — empty or generic non-approval text gets an error and you must wait. Do not paraphrase, do not assume, do not fake."
                     },
+                    "run_id": {
+                        "type": "string",
+                        "description": "Run id returned by build_project / build_new_project / build_from_existing. Optional but STRONGLY recommended — it lets the gate persist artifact URLs and tier_mode across phases. Without it, you must remember everything in your context, and Phase 6 drift detection can't tell what changed."
+                    },
                     "context": {
                         "type": "string",
-                        "description": "Optional: brief context the next phase should know about (e.g. project URLs returned in the prior phase, the user's specific changes to your preview). The next-phase script will reference this back."
+                        "description": "Optional: brief context the next phase should know about (e.g. URLs of artifacts created in the prior phase, the user's specific changes to your preview). The next-phase script will reference this back."
                     }
                 },
                 "required": ["current_phase", "user_signal"]
@@ -1360,6 +1654,99 @@ async def list_tools() -> list[Tool]:
                 "what this docstring knows about."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
+            name="build_new_project",
+            description=(
+                "Greenfield build flow — start from a one-line idea and produce "
+                "requirements (DNG) → tasks (EWM) → tests (ETM) → user review → "
+                "code → tracking. Use this when the user has NO existing artifacts "
+                "and is starting fresh. For brownfield (existing PDF / pasted "
+                "reqs / existing module), use `build_from_existing` instead. "
+                "Returns a run_id you must pass to every subsequent "
+                "`build_project_next` call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_idea": {
+                        "type": "string",
+                        "description": "One-line description of what to build (e.g. 'a temperature converter web app', 'a fleet maintenance scheduling service')."
+                    },
+                    "dng_project": {"type": "string", "description": "DNG project name (optional — AI will ask)."},
+                    "ewm_project": {"type": "string", "description": "EWM project name (optional)."},
+                    "etm_project": {"type": "string", "description": "ETM project name (optional)."},
+                    "tier_mode": {"type": "string", "description": "'single' (one System Requirements module) or 'tiered' (Business→Stakeholder→System). Default 'single'."}
+                },
+                "required": ["project_idea"]
+            }
+        ),
+        Tool(
+            name="build_from_existing",
+            description=(
+                "Brownfield build flow — start from existing material (a Jira "
+                "epic PDF, pasted requirements text, an existing DNG module, "
+                "etc.) and continue from there. Imports / reuses what's already "
+                "there, then converges with the standard flow at Phase 5 (user "
+                "review). Use this when the user has source material to import "
+                "rather than a fresh idea. The first phase asks WHAT they have "
+                "(PDF / pasted text / existing module / link to a ticket) and "
+                "branches accordingly. Returns a run_id you must pass to every "
+                "subsequent `build_project_next` call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_kind": {
+                        "type": "string",
+                        "description": "What kind of source material the user has: 'pdf' (work-item PDF — chains into /import-work-item), 'text' (pasted requirements — chains into /import-requirements), 'module' (existing DNG module URL), 'mixed' (multiple) or '' (ask the user)."
+                    },
+                    "source_path": {"type": "string", "description": "Path to the PDF, or URL of the existing module. Optional — AI will ask if missing."},
+                    "project_idea": {"type": "string", "description": "Short summary of the project. AI will derive from source if not provided."},
+                    "dng_project": {"type": "string", "description": "DNG project name (optional)."},
+                    "ewm_project": {"type": "string", "description": "EWM project name (optional)."},
+                    "etm_project": {"type": "string", "description": "ETM project name (optional)."},
+                    "tier_mode": {"type": "string", "description": "'single' or 'tiered'. Default 'single'."}
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="build_project_status",
+            description=(
+                "Inspect the state of a build-project run by run_id, OR list all "
+                "active runs if run_id is omitted. Returns: current phase, idea, "
+                "tier_mode, project URLs, all artifacts created so far (with "
+                "URLs), approval signals received per phase, drift state if "
+                "Phase 6 has run. Use this when the user asks *'where am I in "
+                "the build?'*, *'what runs are active?'*, or *'what did I do "
+                "in run X?'*. Read-only — no approval gate."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "Run id (optional). If omitted, lists all active runs."}
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="generate_traceability_matrix",
+            description=(
+                "Generate a markdown traceability matrix from a build-project "
+                "run's recorded artifacts. Each row: requirement → tasks → test "
+                "cases → results → defects, with clickable URLs. Phase 9 of the "
+                "build flow uses this to produce the final deliverable, but you "
+                "can call it anytime mid-build to show the user the trace web "
+                "as it exists right now. Read-only — no approval gate."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "Run id from build_new_project / build_from_existing / build_project."}
+                },
+                "required": ["run_id"]
+            }
         ),
         Tool(
             name="connect_to_elm",
@@ -2504,12 +2891,38 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             current_phase = arguments.get("current_phase")
             user_signal = (arguments.get("user_signal") or "").strip()
             context = (arguments.get("context") or "").strip()
+            run_id = (arguments.get("run_id") or "").strip()
 
             if current_phase is None or not isinstance(current_phase, int) or current_phase < 0 or current_phase > 8:
                 return [TextContent(type="text", text=(
                     "Error: current_phase is required and must be an integer 0–8. "
                     "Pass the phase number you JUST finished (e.g. current_phase=2 "
-                    "means you finished Phase 2 and are asking for Phase 3)."
+                    "means you finished Phase 2 and are asking for Phase 3). "
+                    "Phase 7 advances to a new Phase 7.5 (code-review gate) before "
+                    "Phase 8."
+                ))]
+
+            # If run_id provided, look up the run. State persists across phases.
+            run = _get_run(run_id) if run_id else None
+            if run_id and not run:
+                # User passed a run_id we don't recognize — likely server
+                # restart between phases. Surface clearly so AI knows to
+                # start fresh OR continue without state.
+                return [TextContent(type="text", text=(
+                    f"⚠️ run_id `{run_id}` not found in active runs.\n\n"
+                    f"Likely cause: the MCP server restarted between phases "
+                    f"(state is in-memory; doesn't survive restart). Two options:\n\n"
+                    f"  1. **Restart the build flow** — call "
+                    f"`build_new_project` or `build_from_existing` again with "
+                    f"the user's original idea. They'll get a fresh run_id and "
+                    f"you'll need to redo any phases that were already approved.\n"
+                    f"  2. **Continue without state** — re-call "
+                    f"`build_project_next` without the `run_id` argument. "
+                    f"You'll lose drift detection at Phase 6 and traceability "
+                    f"matrix at Phase 9 (both depend on stored state), but "
+                    f"approval gates still work.\n\n"
+                    f"Currently active runs: "
+                    f"{[r['run_id'] for r in _list_active_runs()] or 'none'}"
                 ))]
 
             # Approval-signal validation. We accept "yes"/"go ahead"/etc. (1+ word
@@ -2594,12 +3007,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"confirm with 'yes' before calling this tool."
                 ))]
 
-            next_phase = current_phase + 1
+            # Phase 7 advances to 7.5 (review gate), then 7.5 to 8.
+            if current_phase == 7:
+                next_phase = 7.5
+            elif current_phase == 7.5 or (isinstance(current_phase, float) and abs(current_phase - 7.5) < 0.01):
+                next_phase = 8
+            else:
+                next_phase = current_phase + 1
+
+            # Persist state on the run if we have one.
+            if run is not None:
+                run["current_phase"] = next_phase
+                run["approval_signals"][str(current_phase)] = user_signal
+                _touch_run(run)
+
             ctx_block = f"\n\n**Context from prior phase:** {context}" if context else ""
             all_matches = sorted(matched) + sorted(matched_phrases)
+            run_block = (
+                f"\n\n**Run state:** `{run['run_id']}` at phase {next_phase}. "
+                f"`build_project_status(run_id=\"{run['run_id']}\")` shows "
+                f"all artifacts so far."
+                if run else ""
+            )
             ack = (f"✓ Phase {current_phase} approved (matched on: "
                    f"{', '.join(all_matches) if all_matches else 'approval'}). "
-                   f"Advancing to Phase {next_phase}.")
+                   f"Advancing to Phase {next_phase}.{run_block}")
 
             phase_scripts = {
                 1: ("PHASE 1 — PROJECT INTAKE INTERVIEW",
@@ -2670,24 +3102,46 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "minutes, 5 hours, or 5 days — that's fine.\n\n"
                     "When they signal continue, call `build_project_next("
                     "current_phase=5, user_signal=<their reply>)`."),
-                6: ("PHASE 6 — RE-PULL CURRENT ELM STATE",
-                    "User has reviewed in ELM and signaled continue. NOW:\n\n"
-                    "  1. Call get_attribute_definitions on the DNG project to "
-                    "discover the project's actual 'approved' status value (don't "
-                    "guess — different projects use 'Approved', 'Accepted', 'Ready', "
-                    "etc.).\n"
-                    "  2. get_module_requirements on the System Requirements module "
-                    "with filter={\"Status\": \"<Approved value>\"}.\n"
-                    "  3. query_work_items for active EWM tasks (oslc.where=oslc_cm:"
-                    "closed=false).\n"
-                    "  4. Re-fetch test cases (or filter by validatesRequirement to "
-                    "the requirement URLs).\n"
-                    "  5. Show user a current-state summary: 'You have N approved "
-                    "reqs (was M originally), K active tasks, J test cases. Building "
-                    "based on this. OK?'\n\n"
+                6: ("PHASE 6 — RE-PULL CURRENT ELM STATE + DRIFT DETECTION",
+                    "User has reviewed in ELM and signaled continue. NOW perform "
+                    "real drift detection — compare current ELM state against the "
+                    "artifacts this run created at Phases 2–4.\n\n"
+                    "Step 1: discover the project's 'approved' status value.\n"
+                    "  - Call `get_attribute_definitions` on the DNG project. "
+                    "Look for the 'Status' attribute → Allowed Values. Pick the "
+                    "value that semantically means 'approved' for this project "
+                    "(could be 'Approved', 'Accepted', 'Ready', etc. — don't guess).\n"
+                    "  - If you have a run_id, save it to the run via the next "
+                    "`build_project_next` context so subsequent phases can use it.\n\n"
+                    "Step 2: drift detection (only meaningful if you have run_id).\n"
+                    "  - Call `build_project_status(run_id=...)` to see what was "
+                    "created at Phases 2–4.\n"
+                    "  - For each requirement URL stored in the run, GET it from "
+                    "DNG. Compare current `dcterms:modified` against the run's "
+                    "stored `modified_at`. If different → the user edited it.\n"
+                    "  - For each task URL, query its current state — was it "
+                    "transitioned, reassigned, or closed?\n"
+                    "  - For each test URL, check it still exists (404 = deleted).\n"
+                    "  - List drift findings: `unchanged: N`, `modified: [REQ-7]`, "
+                    "`deleted: [TC-9]`, plus any newly-added artifacts the human "
+                    "created in DNG that aren't in the run's records.\n\n"
+                    "Step 3: re-pull approved subset.\n"
+                    "  - `get_module_requirements` with filter for the approved "
+                    "status value.\n"
+                    "  - `query_work_items` for active EWM tasks "
+                    "(`oslc.where=oslc_cm:closed=false`).\n"
+                    "  - Verify test cases via validatesRequirement backlinks.\n\n"
+                    "Step 4: show user a current-state summary with drift detail:\n"
+                    "  *'After your review:\n"
+                    "  - 14 reqs total, 12 Approved, 2 Rejected\n"
+                    "  - REQ-7 was edited (text changed since I generated it)\n"
+                    "  - 2 new reqs added by you (REQ-15, REQ-16)\n"
+                    "  - All 14 tasks still active\n"
+                    "  - 1 test case (TC-9) deleted\n"
+                    "  Building based on the 12 approved reqs. OK to proceed?'*\n\n"
                     "When user confirms, call `build_project_next(current_phase=6, "
-                    "user_signal=<reply>, context='<final lists of approved reqs, "
-                    "active tasks, tests>')`."),
+                    "user_signal=<reply>, run_id=<run_id>, context='<approved-state "
+                    "value, final URLs>')`."),
                 7: ("PHASE 7 — WRITE THE CODE",
                     "User approved Phase 6's current state. NOW write the actual "
                     "application code in the user's IDE using the AI host's "
@@ -2701,10 +3155,40 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "Code structure should mirror requirement structure where "
                     "reasonable.\n\n"
                     "When code is written and the user has had a chance to inspect, "
-                    "ask if they want to advance to Phase 8 (track work + record "
-                    "test results in ELM). On approval, call build_project_next("
+                    "ask the user explicitly: *'Code is written. Want to open a "
+                    "PR/code review now (Phase 7.5), or skip the review gate and "
+                    "go straight to marking tasks Resolved (Phase 8)?'*\n\n"
+                    "On approval to advance, call build_project_next("
                     "current_phase=7, user_signal=<reply>, context='<files written, "
-                    "key reqs implemented>')."),
+                    "key reqs implemented>'). Phase 7 always advances to "
+                    "Phase 7.5 — the review gate."),
+                7.5: ("PHASE 7.5 — CODE-REVIEW GATE",
+                    "Code is written but not yet marked Resolved. Before "
+                    "transitioning tasks (Phase 8), ensure SOMEONE has reviewed "
+                    "the code. The team's review surface varies — don't impose:\n\n"
+                    "  - **Solo iteration**: paste the diff in chat, user reads, "
+                    "    says 'looks good'\n"
+                    "  - **GitHub PR workflow**: open the PR via `gh pr create` "
+                    "    (or have user open it), share the URL, user reads in "
+                    "    GitHub, comes back with 'approved' / 'merged'\n"
+                    "  - **Jazz code review**: create an EWM review work item "
+                    "    linked to the change set, request reviewers, wait for "
+                    "    Approval records to come in\n"
+                    "  - **No review needed** (e.g. throwaway prototype): user "
+                    "    explicitly says 'skip review'\n\n"
+                    "ASK the user: *'Where do you do code review for this "
+                    "project? GitHub PR / Jazz code review / chat / skip?'* Then "
+                    "wait. Don't poll, don't peek, don't pretend.\n\n"
+                    "Once they confirm review is done — *'PR approved'*, *'Sarah "
+                    "signed off'*, *'merged'*, *'looks good'* — call "
+                    "`build_project_next(current_phase=7.5, user_signal=<their "
+                    "reply>, run_id=<run_id>)` to advance to Phase 8.\n\n"
+                    "If they say *'skip review'* or *'no review needed'*, that's "
+                    "still an explicit signal — pass it as the user_signal and "
+                    "the gate accepts it (treats 'skip' as a valid override).\n\n"
+                    "**Anti-pattern:** marking tasks Resolved in Phase 8 without "
+                    "any human reviewing the code. The whole point of this gate "
+                    "is to ensure that doesn't happen."),
                 8: ("PHASE 8 — TRACK WORK + RECORD RESULTS",
                     "Walk through each task and test:\n"
                     "  - As each task is implemented: transition_work_item("
@@ -2719,9 +3203,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "requirement and test case URLs.\n\n"
                     "When all tasks/tests are walked, call build_project_next("
                     "current_phase=8, user_signal=<reply>) for the final summary."),
-                9: ("PHASE 9 — FINAL SUMMARY",
-                    "Build complete. Give the user a complete picture using markdown "
-                    "links:\n\n"
+                9: ("PHASE 9 — FINAL SUMMARY + TRACEABILITY MATRIX",
+                    "Build complete. The deliverable is the traceability matrix "
+                    "plus a state summary.\n\n"
+                    "Step 1: call `generate_traceability_matrix(run_id=<run_id>)`. "
+                    "It returns a markdown table linking every requirement to "
+                    "its tasks, test cases, results, and defects-if-any. Surface "
+                    "the table inline.\n\n"
+                    "Step 2: short state summary using markdown links:\n\n"
                     "  - DNG: [Module name](url) — N reqs ({M} Approved, {K} "
                     "Rejected)\n"
                     "  - EWM: {N} tasks total — {M} Resolved, {K} In Progress, {J} "
@@ -2751,9 +3240,141 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             title, body = phase_scripts[next_phase]
             return [TextContent(type="text", text=f"{ack}\n\n## {title}\n\n{body}{ctx_block}")]
 
-        if name == "build_project":
+        # ── build_project_status ──────────────────────────────────
+        if name == "build_project_status":
+            run_id = (arguments.get("run_id") or "").strip()
+            if not run_id:
+                # No run_id → list all active runs
+                runs = _list_active_runs()
+                if not runs:
+                    return [TextContent(type="text", text=(
+                        "No active build-project runs. Start one with "
+                        "`build_new_project` (greenfield) or `build_from_existing` "
+                        "(brownfield)."
+                    ))]
+                lines = [f"# Active build-project runs ({len(runs)})", ""]
+                for r in runs:
+                    lines.append(
+                        f"- **`{r['run_id']}`** [{r['command']}] phase={r['phase']} "
+                        f"started={r['started_at'][:19]}\n  idea: {r['idea']}"
+                    )
+                lines.append("")
+                lines.append("Pass `run_id=<id>` to see full state for a specific run.")
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            run = _get_run(run_id)
+            if not run:
+                return [TextContent(type="text", text=(
+                    f"Run `{run_id}` not found. Active runs: "
+                    f"{[r['run_id'] for r in _list_active_runs()] or 'none'}"
+                ))]
+
+            artifacts = run.get("artifacts", {})
+            lines = [
+                f"# Run `{run['run_id']}` — status",
+                "",
+                f"- **Command:** {run.get('command', 'unknown')}",
+                f"- **Current phase:** {run.get('current_phase', 0)}",
+                f"- **Tier mode:** {run.get('tier_mode', 'single')}",
+                f"- **Idea:** {run.get('project_idea', '')}",
+                f"- **Started:** {run.get('started_at', '')}",
+                f"- **Last update:** {run.get('last_updated_at', '')}",
+                "",
+                "## Project URLs",
+            ]
+            urls = run.get("project_urls", {}) or {}
+            for k in ("dng", "ewm", "etm"):
+                v = urls.get(k, "")
+                lines.append(f"- {k.upper()}: {v if v else '_(not set)_'}")
+            lines.append("")
+            lines.append("## Artifacts created so far")
+            for kind, items in artifacts.items():
+                lines.append(f"### {kind} ({len(items)})")
+                for it in items[:50]:
+                    lines.append(f"- [{it.get('title', '?')}]({it.get('url', '')})")
+                if len(items) > 50:
+                    lines.append(f"_(+{len(items)-50} more)_")
+                lines.append("")
+            sigs = run.get("approval_signals", {})
+            if sigs:
+                lines.append("## Approval signals received per phase")
+                for ph in sorted(sigs.keys(), key=lambda x: float(x)):
+                    lines.append(f"- Phase {ph}: \"{sigs[ph]}\"")
+                lines.append("")
+            drift = run.get("drift")
+            if drift:
+                lines.append("## Drift detected at Phase 6")
+                lines.append(f"- unchanged: {drift.get('unchanged', 0)}")
+                lines.append(f"- modified: {drift.get('modified', [])}")
+                lines.append(f"- deleted: {drift.get('deleted', [])}")
+                lines.append(f"- added externally: {drift.get('added_externally', [])}")
+                lines.append("")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ── generate_traceability_matrix ──────────────────────────
+        if name == "generate_traceability_matrix":
+            run_id = (arguments.get("run_id") or "").strip()
+            if not run_id:
+                return [TextContent(type="text", text=(
+                    "Error: run_id is required. Pass the id returned by "
+                    "`build_new_project` / `build_from_existing` / `build_project`."
+                ))]
+            run = _get_run(run_id)
+            if not run:
+                return [TextContent(type="text", text=(
+                    f"Run `{run_id}` not found. Active runs: "
+                    f"{[r['run_id'] for r in _list_active_runs()] or 'none'}"
+                ))]
+            arts = run.get("artifacts", {})
+            reqs = arts.get("requirements", []) or []
+            tasks = arts.get("tasks", []) or []
+            tests = arts.get("tests", []) or []
+            if not (reqs or tasks or tests):
+                return [TextContent(type="text", text=(
+                    f"Run `{run_id}` has no recorded artifacts yet. "
+                    f"Traceability matrix needs at least requirements + tasks "
+                    f"+ tests recorded via build_project_next context."
+                ))]
+            # Build a simple matrix. Without active link discovery, pair by
+            # creation order (which matches the build flow's 1-task-per-req
+            # / 1-test-per-req pattern). For cross-link verification, the AI
+            # should follow up by querying actual links if needed.
+            lines = [
+                f"# Traceability Matrix — run `{run_id}`",
+                f"_Project: {run.get('project_idea', '?')}_",
+                "",
+                "| # | Requirement | Task | Test Case |",
+                "|---|---|---|---|",
+            ]
+            n = max(len(reqs), len(tasks), len(tests))
+            for i in range(n):
+                r = reqs[i] if i < len(reqs) else None
+                t = tasks[i] if i < len(tasks) else None
+                tc = tests[i] if i < len(tests) else None
+                req_cell = f"[{r['title']}]({r['url']})" if r else "—"
+                task_cell = f"[{t['title']}]({t['url']})" if t else "—"
+                test_cell = f"[{tc['title']}]({tc['url']})" if tc else "—"
+                lines.append(f"| {i+1} | {req_cell} | {task_cell} | {test_cell} |")
+            lines.append("")
+            lines.append(
+                f"**Counts:** {len(reqs)} reqs · {len(tasks)} tasks · "
+                f"{len(tests)} tests"
+            )
+            lines.append("")
+            lines.append(
+                "_Pairing is by creation order, which matches build_project's "
+                "1-per-requirement convention. To verify actual cross-links, "
+                "follow `oslc_cm:implementsRequirement` from each task and "
+                "`oslc_qm:validatesRequirement` from each test._"
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        if name in ("build_project", "build_new_project", "build_from_existing"):
             idea = (arguments.get("project_idea") or "").strip()
-            if not idea:
+            command_label = name  # one of build_project / build_new_project / build_from_existing
+            source_kind = (arguments.get("source_kind") or "").strip().lower() if name == "build_from_existing" else ""
+            source_path = (arguments.get("source_path") or "").strip() if name == "build_from_existing" else ""
+            if not idea and name != "build_from_existing":
                 return [TextContent(type="text", text=(
                     "Error: project_idea is required. Re-call with the user's "
                     "one-line description, e.g. project_idea='a temperature converter "
@@ -2765,6 +3386,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             tier_mode = (arguments.get("tier_mode") or "single").strip().lower()
             if tier_mode not in ("single", "tiered"):
                 tier_mode = "single"
+
+            # Create a persistent run object so phase context survives across
+            # build_project_next calls. The run_id is returned in the response
+            # for the AI to remember and pass back.
+            run = _new_run(
+                command=command_label,
+                project_idea=idea or (f"(from {source_kind} import)" if source_kind else "(unspecified)"),
+                tier_mode=tier_mode,
+                project_urls={"dng": dng, "ewm": ewm, "etm": etm},
+            )
+
+            # Pre-flight version check — surface at the very top so the user
+            # can opt to update before starting a long build flow.
+            preflight = _preflight_version_block()
 
             proj_lines = []
             if dng: proj_lines.append(f"- DNG project: **{dng}**")
@@ -2781,7 +3416,74 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 else "one System Requirements module"
             )
 
+            # build_from_existing branches at Phase 1 — interview the user
+            # about WHAT they have rather than running the greenfield intake.
+            existing_branch = ""
+            if name == "build_from_existing":
+                source_intro = ""
+                if source_kind == "pdf" and source_path:
+                    source_intro = (
+                        f"Source kind: **PDF** at `{source_path}`. Phase 1 "
+                        f"will invoke `/import-work-item` to parse it.\n\n"
+                    )
+                elif source_kind == "text":
+                    source_intro = (
+                        "Source kind: **pasted requirements**. Phase 1 will "
+                        "invoke `/import-requirements`.\n\n"
+                    )
+                elif source_kind == "module" and source_path:
+                    source_intro = (
+                        f"Source kind: **existing DNG module** at `{source_path}`. "
+                        f"Phase 1 will read it (no creation; reuse).\n\n"
+                    )
+                else:
+                    source_intro = (
+                        "Source kind: **NOT SPECIFIED**. In Phase 1, ask the "
+                        "user *exactly*: \"What do you have as input — (a) a "
+                        "PDF of a work item / Jira epic, (b) requirements "
+                        "pasted as text, (c) an existing DNG module URL, or "
+                        "(d) a mix?\" Then route accordingly:\n"
+                        "  - (a) → invoke /import-work-item, capture the "
+                        "  resulting EWM/DNG/ETM URLs into this run via "
+                        "  `build_project_next` context\n"
+                        "  - (b) → invoke /import-requirements, capture the "
+                        "  resulting module + req URLs\n"
+                        "  - (c) → call `get_modules` + `get_module_requirements` "
+                        "  on the URL, capture the URLs into the run\n"
+                        "  - (d) → run multiple of the above sequentially\n\n"
+                    )
+                existing_branch = (
+                    f"## 🌱 BUILD-FROM-EXISTING MODE\n\n"
+                    f"This run starts from existing material rather than from "
+                    f"scratch. {source_intro}"
+                    f"After Phase 1 (import / read), the run converges with "
+                    f"the standard flow at Phase 5 (user-review-pause). "
+                    f"Phases 2–4 are SKIPPED if all three artifact types "
+                    f"(reqs / tasks / tests) already exist; otherwise we "
+                    f"fill in what's missing.\n\n"
+                    f"---\n\n"
+                )
+
+            run_id_block = (
+                f"## 🆔 RUN ID: `{run['run_id']}`\n\n"
+                f"**Pass this run_id to every `build_project_next` call** so "
+                f"phase context (project URLs, tier_mode, every artifact "
+                f"created) persists across phases. Without run_id, state lives "
+                f"only as long as your conversation memory — which means "
+                f"context compaction can lose URLs and break Phase 6 drift "
+                f"detection.\n\n"
+                f"Helpful tools that use this run_id:\n"
+                f"- `build_project_status(run_id=\"{run['run_id']}\")` — see "
+                f"all artifacts created so far in any phase\n"
+                f"- `generate_traceability_matrix(run_id=\"{run['run_id']}\")` "
+                f"— produce the req↔task↔test matrix at Phase 9 (or any time)\n\n"
+                f"---\n\n"
+            )
+
             return [TextContent(type="text", text=(
+                f"{preflight}"
+                f"{existing_branch}"
+                f"{run_id_block}"
                 f"# 🎬 Agentic Project Build Started\n\n"
                 f"**Project idea:** {idea}\n\n"
                 f"**Tier mode:** {tier_mode} ({tier_text})\n\n"
@@ -2895,7 +3597,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"forever — no Phase {{N+1}} script will be available to you.\n\n"
                 f"After Phase 0 (connection + project selection), call "
                 f"`build_project_next(current_phase=0, user_signal=<user said the "
-                f"projects to use>)` to get Phase 1's interview questions.\n\n"
+                f"projects to use>, run_id=\"{run['run_id']}\")` to get Phase 1's "
+                f"interview questions. **Always include `run_id`** so the gate "
+                f"can persist project URLs and tier_mode for later phases.\n\n"
                 f"**REMINDER:** the WRITE GATE rule applies to every create_* / update_* "
                 f"/ transition_* call inside this flow. Per-phase user approval is "
                 f"non-negotiable. The user merely saying 'build a project' was the "
@@ -4625,7 +5329,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (44 tools, 7 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (48 tools, 9 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

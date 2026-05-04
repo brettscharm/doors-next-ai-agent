@@ -376,6 +376,20 @@ _BOB_ALWAYS_ALLOW = [
     "scm_get_workitem_changesets",
     "review_get",
     "review_list_open",
+    # Update tooling — auto-approved because the user explicitly asks
+    # for an update, and the alternative is Bob shelling out 8 git
+    # commands that EACH prompt for approval. One-tool-call update.
+    "update_elm_mcp",
+    # Build-project orchestration tools — these don't write to ELM
+    # themselves; they return phase scripts for the AI to execute.
+    # Auto-approve so Bob doesn't gate the orchestration plumbing.
+    # The actual writes (create_requirement, create_task, etc.) still
+    # prompt because they're not in this list.
+    "build_project",
+    "build_project_next",
+    "build_new_project",
+    "build_from_existing",
+    "build_project_status",
 ]
 # Note: generate_chart and save_requirements are intentionally NOT in this
 # list. Both write to local disk (PNG / JSON), so they should prompt the
