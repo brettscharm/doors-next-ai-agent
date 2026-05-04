@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -372,6 +372,42 @@ async def list_prompts() -> list[Prompt]:
             ],
         ),
         Prompt(
+            name="import-requirements",
+            description=(
+                "Brownfield import — user pastes existing requirements (Jira "
+                "epic body, Notion doc, Word content, bullet list, anything), "
+                "AI parses into atomic shall-statements + NFRs, separates "
+                "acceptance criteria for ETM later, skips non-requirement "
+                "content (business goals / risks / assumptions / DoD), shows "
+                "a preview, and on approval creates a DNG module with all "
+                "requirements auto-bound. Returns direct DNG links so "
+                "ELM-savvy users can dive in normally. Zero retyping — paste "
+                "and ship."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="content",
+                    description="The requirements text to parse and import. Paste a Jira epic body, Notion doc, Word content, markdown, plain bullets — anything textual. Optional; AI will ask if not provided.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="module_name",
+                    description="What to call the new DNG module. Optional — AI will suggest a name based on the content if not provided.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="project",
+                    description="DNG project name or number where the module should be created. Optional — AI will ask if not provided.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="source_hint",
+                    description="Hint about the format/source: 'jira', 'notion', 'word', 'markdown', 'bullets', 'prose'. Optional — AI auto-detects.",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
             name="build-project",
             description=(
                 "End-to-end agentic project build with IBM ELM as the system "
@@ -512,6 +548,158 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
                 f"4. Present in a preview table\n"
                 f"5. Wait for my approval before pushing to DNG\n"
                 f"6. After creation, offer to create a baseline snapshot"
+            )),
+        )]
+
+    elif name == "import-requirements":
+        content = args.get("content", "")
+        module_name = args.get("module_name", "")
+        project = args.get("project", "")
+        source_hint = args.get("source_hint", "")
+
+        intro = (
+            "The user wants to import existing requirements they already wrote "
+            "elsewhere (Jira epic, Notion doc, Word content, bullet list, "
+            "markdown, copied PDF text, etc.) into DNG as a structured module. "
+            "This is the BROWNFIELD path — they aren't asking you to write new "
+            "reqs, they're asking you to STRUCTURE what they already have.\n\n"
+        )
+
+        if content:
+            content_block = (
+                f"--- USER'S PASTED CONTENT ---\n{content}\n--- END ---\n\n"
+            )
+        else:
+            content_block = (
+                "The user hasn't pasted content yet. Your first message should "
+                "be a short prompt: *\"Paste your requirements — Jira epic body, "
+                "Notion doc, Word content, plain bullets, anything textual. I'll "
+                "parse and structure it for DNG.\"* Then wait for the paste.\n\n"
+            )
+
+        hint_block = (
+            f"Source hint from user: '{source_hint}'. Use this to inform parsing "
+            f"(e.g. 'jira' implies Atlassian markdown + epic structure; 'word' "
+            f"implies prose paragraphs; 'bullets' implies pre-structured items).\n\n"
+        ) if source_hint else ""
+
+        target_block = ""
+        if project:
+            target_block += f"Target DNG project: '{project}' (use this; don't ask).\n"
+        else:
+            target_block += (
+                "Target DNG project: not specified. Use the currently-connected "
+                "project if there's one obvious; otherwise ask which project. "
+                "Don't `list_projects` unless the user is unsure.\n"
+            )
+        if module_name:
+            target_block += f"Target module name: '{module_name}' (use this; don't ask).\n\n"
+        else:
+            target_block += (
+                "Target module name: not specified. Suggest one based on the "
+                "content's subject — e.g. if the paste is about a tracking "
+                "service, suggest 'ETS Tracking - System Requirements'. Make "
+                "the suggestion concrete and ask the user to confirm or edit.\n\n"
+            )
+
+        instructions = (
+            "## How to parse the pasted content\n\n"
+            "Walk through the text and bucket everything into one of FIVE "
+            "categories. Be strict — don't put things in the wrong bucket "
+            "just to inflate the count.\n\n"
+            "### 1. Functional Requirements\n"
+            "Statements of WHAT the system does. Convert each to a single "
+            "atomic 'shall' statement. Examples:\n"
+            "  • 'Ingest FarEye payloads from ASB' → 'The system shall ingest "
+            "    FarEye tracking payloads from Azure Service Bus Topic + "
+            "    Subscription.'\n"
+            "  • 'Mask PII in API responses' → 'The system shall mask PII "
+            "    fields (receivedBy, driverName, POD URLs) in all public API "
+            "    response payloads.'\n"
+            "Don't merge two statements into one req. Don't fluff one idea "
+            "into two reqs.\n\n"
+            "### 2. Non-Functional Requirements\n"
+            "Performance, reliability, security, observability, retention, "
+            "concurrency, etc. Examples: 'p95 < 200ms cached', 'append-only "
+            "history', 'idempotent processing', '7-year retention'. Same atomic "
+            "'shall' shape, but tagged as NFR.\n\n"
+            "### 3. Acceptance Criteria  →  HOLD for ETM\n"
+            "Numbered AC lists, 'given/when/then', 'X is implemented', or any "
+            "test-shaped condition. These DO NOT belong in DNG as requirements. "
+            "Capture them and tell the user *\"I'll put these in test cases "
+            "later if you create test cases for this module.\"* Don't push them "
+            "as requirements no matter how the input formats them.\n\n"
+            "### 4. Constraints / Assumptions / Risks  →  optionally separate\n"
+            "If the input has Risks / Dependencies / Assumptions sections, ask "
+            "the user once if they want those captured as separate artifacts "
+            "(typically a different shape — Constraint, Risk, Assumption). "
+            "Default behavior: SKIP them and tell the user they were skipped.\n\n"
+            "### 5. Skip entirely\n"
+            "Business Goal, Business Value, In/Out of Scope, Definition of "
+            "Done, Epic Components, project descriptions, comments, change "
+            "logs, header/footer metadata. These aren't requirements; they're "
+            "project metadata. Note them as 'Skipped' in the preview so the "
+            "user knows you saw them and made a decision.\n\n"
+            "## The preview\n\n"
+            "Before pushing anything, show the user a structured preview:\n\n"
+            "```\n"
+            "Parsed your input:\n\n"
+            "  Functional Requirements (N)\n"
+            "    1. <full text of req 1>\n"
+            "    2. <full text of req 2>\n"
+            "    ... all listed\n\n"
+            "  Non-Functional Requirements (M)\n"
+            "    1. ...\n\n"
+            "  Acceptance Criteria (K) — held for ETM if you create test cases\n"
+            "    1. ...\n\n"
+            "  Skipped (J items, project metadata not requirement-shaped)\n"
+            "    - Business Goal, Business Value\n"
+            "    - Risks, Dependencies, Assumptions  (say 'yes' to capture as separate artifacts)\n"
+            "    - Definition of Done\n"
+            "    ... etc\n\n"
+            "  Target: New module '<suggested or specified name>' in <project>\n\n"
+            "Edits before I push? Or 'looks good' to ship.\n"
+            "```\n\n"
+            "## Wait for explicit approval\n\n"
+            "Don't push until the user says 'yes' / 'looks good' / 'ship it' / "
+            "'push' or similar verbatim approval. If they ask for edits, apply "
+            "them and re-preview. Same write-gate pattern as every other tool.\n\n"
+            "## On approval\n\n"
+            "Call `create_requirements` ONCE with:\n"
+            "  • project_url (the connected/specified DNG project)\n"
+            "  • module_name=<the agreed name>  (this auto-creates the module "
+            "    AND auto-binds every requirement to it — no separate "
+            "    create_module call needed)\n"
+            "  • requirements=[ ... ] with one entry per parsed requirement, "
+            "    each containing title (short summary) + content (the full "
+            "    'shall' statement) + appropriate type (functional / NFR / "
+            "    constraint based on which bucket it landed in)\n\n"
+            "## After the push\n\n"
+            "Surface direct links — the module URL plus every requirement URL "
+            "as markdown links. Engineers who know DNG will click in to verify; "
+            "engineers who don't can ignore the links. Both audiences served.\n\n"
+            "Then offer the natural next steps:\n"
+            "  • *\"Want me to create EWM tasks for these requirements? "
+            "    (one task per req, linked via implementsRequirement)\"*\n"
+            "  • *\"Want me to create ETM test cases? "
+            "    (I'll use the held acceptance criteria + generate any missing "
+            "    ones, all linked back to the reqs)\"*\n"
+            "  • *\"Want a baseline snapshot of the module right now?\"* (if "
+            "    the project has configuration management enabled)\n\n"
+            "## What this prompt is NOT\n\n"
+            "  • Not for generating reqs from scratch — that's "
+            "    /generate-requirements\n"
+            "  • Not for importing PDFs — that's /import-pdf (which extracts "
+            "    text first, then could chain into here)\n"
+            "  • Not for the full /build-project flow — though /build-project "
+            "    Phase 1 path (b) reuses this same parsing logic when the "
+            "    user says they have existing reqs"
+        )
+
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                intro + content_block + hint_block + target_block + instructions
             )),
         )]
 
@@ -3959,7 +4147,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (40 tools, 5 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (40 tools, 6 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

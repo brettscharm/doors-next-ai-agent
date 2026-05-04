@@ -2281,10 +2281,33 @@ class DOORSNextClient:
                 timeout=self._TIMEOUT,
             )
             if resp.status_code in [200, 201]:
-                return {
+                task_url = resp.headers.get('Location', '')
+                result = {
                     'title': clean_title,
-                    'url': resp.headers.get('Location', ''),
+                    'url': task_url,
                 }
+                # Bidirectional link write — DNG only renders inbound links
+                # in its UI when the inverse triple is explicitly stored ON
+                # the requirement. The forward link from EWM (oslc_cm:
+                # implementsRequirement) makes the EWM work item show the
+                # requirement, but doesn't make the requirement show the
+                # task. Write oslc_rm:trackedBy back onto the requirement so
+                # DNG's "Links" panel renders it.
+                if requirement_url and task_url:
+                    backlink_result = self.create_link(
+                        source_url=requirement_url,
+                        link_type_uri='http://open-services.net/ns/rm#trackedBy',
+                        target_url=task_url,
+                    )
+                    if backlink_result and 'error' in backlink_result:
+                        result['backlink_warning'] = (
+                            f"Forward link (EWM→DNG) succeeded; back-link "
+                            f"(DNG→EWM) failed: {backlink_result['error']}. "
+                            f"The work item shows the requirement, but the "
+                            f"requirement may not show the work item in "
+                            f"DNG's Links panel."
+                        )
+                return result
             error_msg = self._extract_oslc_error(resp.text)
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
         except Exception as e:
@@ -2419,10 +2442,30 @@ class DOORSNextClient:
                 timeout=self._TIMEOUT,
             )
             if resp.status_code in [200, 201]:
-                return {
+                test_case_url = resp.headers.get('Location', '')
+                result = {
                     'title': clean_title,
-                    'url': resp.headers.get('Location', ''),
+                    'url': test_case_url,
                 }
+                # Bidirectional link write — DNG only renders inbound links
+                # in its UI when the inverse triple is explicitly stored ON
+                # the requirement. Write oslc_rm:validatedBy back onto the
+                # requirement so DNG's "Links" panel renders the test case.
+                if requirement_url and test_case_url:
+                    backlink_result = self.create_link(
+                        source_url=requirement_url,
+                        link_type_uri='http://open-services.net/ns/rm#validatedBy',
+                        target_url=test_case_url,
+                    )
+                    if backlink_result and 'error' in backlink_result:
+                        result['backlink_warning'] = (
+                            f"Forward link (ETM→DNG) succeeded; back-link "
+                            f"(DNG→ETM) failed: {backlink_result['error']}. "
+                            f"The test case shows the requirement, but the "
+                            f"requirement may not show the test case in "
+                            f"DNG's Links panel."
+                        )
+                return result
             error_msg = self._extract_oslc_error(resp.text)
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg else f"HTTP {resp.status_code}"}
         except Exception as e:
@@ -3749,7 +3792,28 @@ class DOORSNextClient:
                 timeout=self._TIMEOUT,
             )
             if resp.status_code in [200, 201]:
-                return {'title': clean_title, 'url': resp.headers.get('Location', '')}
+                defect_url = resp.headers.get('Location', '')
+                result = {'title': clean_title, 'url': defect_url}
+                # Bidirectional link write — same DNG render-quirk as
+                # create_ewm_task / create_test_case. The forward link
+                # (oslc_cm:affectsRequirement on the defect) makes the
+                # defect show the requirement; we need the inverse triple
+                # on the requirement so DNG renders the defect in its
+                # Links panel. oslc_rm:affectedBy is the inverse.
+                if requirement_url and defect_url:
+                    backlink_result = self.create_link(
+                        source_url=requirement_url,
+                        link_type_uri='http://open-services.net/ns/rm#affectedBy',
+                        target_url=defect_url,
+                    )
+                    if backlink_result and 'error' in backlink_result:
+                        result['backlink_warning'] = (
+                            f"Forward link (EWM→DNG) succeeded; back-link "
+                            f"(DNG→EWM) failed: {backlink_result['error']}. "
+                            f"The defect shows the requirement, but the "
+                            f"requirement may not show the defect in DNG."
+                        )
+                return result
             error_msg = self._extract_oslc_error(resp.text)
             return {'error': f"HTTP {resp.status_code}: {error_msg}" if error_msg
                     else f"HTTP {resp.status_code}"}

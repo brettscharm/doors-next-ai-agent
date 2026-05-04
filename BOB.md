@@ -2,7 +2,7 @@
 
 > **DISCLAIMER:** This is a personal passion project. NOT an official IBM product, NOT created or endorsed by the ELM development team. Use at your own risk. IBM, DOORS Next, ELM, EWM, and ETM are trademarks of IBM Corporation.
 
-This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 38 tools total. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
+This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 40 tools + 6 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
 
 ## TRIGGER PHRASES — match user intent to the right workflow
 
@@ -17,6 +17,7 @@ Before doing anything, check what the user actually wants. The mapping below cat
 | "create test cases" / "I need tests for these requirements" | **Step 3e** | skip `requirement_url` linking |
 | "do the full lifecycle" / "requirements + tasks + tests" | **Step 3f: FULL LIFECYCLE Path** | merge it with build-project (full-lifecycle stops after Phase 3; build-project continues into code) |
 | "import this PDF" / "read these requirements from a PDF" | **Step 3c: PDF IMPORT** | extract the PDF yourself; use `extract_pdf` |
+| "import these requirements" / "I have requirements already" / "we wrote them in Jira/Notion/Word" / "/import-requirements" / user pastes a chunk of text that's clearly requirements (Jira epic body, bullet list of shall-statements, etc.) | **Step 3j: IMPORT REQUIREMENTS Path** — invoke the `/import-requirements` prompt. Brownfield path: parse pasted content → preview → push to a new DNG module with auto-bind. | re-write the user's requirements in your own words — preserve their text. Don't put acceptance criteria in DNG; hold them for ETM. Don't push without preview + approval. |
 | "show me the requirements in [module]" / "list reqs" / "read [module]" | **Step 3a: READ Path** | dump every req without filter — interview about filtering first |
 | "update yourself" / "are you up to date" / "pull the latest" | call `update_elm_mcp` | manually run git commands |
 | "what can you do?" / "list your tools" / "help" | call `list_capabilities` | enumerate tools from memory |
@@ -803,6 +804,51 @@ Give the user a complete picture:
 - ❌ Forgetting to transition tasks during Phase 7/8 — leaves ELM out of sync with what's actually built
 - ❌ Hiding URLs behind a generic `/rm` link — every artifact gets a markdown-link surface
 - ❌ Calling `build_project_next` with `user_signal=""` or paraphrased / inferred / "I think they meant yes" signals — pass the user's verbatim reply or the gate refuses
+
+### Step 3j: IMPORT REQUIREMENTS Path (brownfield — paste-to-DNG)
+
+Triggered when the user already has requirements written somewhere else (Jira epic, Notion doc, Word file, copied bullets, markdown spec, a wiki page, anything textual) and wants them in DNG. **You do NOT regenerate the user's content** — you preserve their wording, you just structure it.
+
+This path is invoked by:
+- The `/import-requirements` prompt explicitly
+- Trigger phrases: *"I have requirements already"*, *"we wrote them in Jira"*, *"import these"*, *"here are our reqs, put them in DNG"*
+- The user pastes a clearly-requirement-shaped chunk of text without a generation request
+- `/build-project` Phase 1 — when user picks path (b) "I have existing reqs"
+
+#### What you do
+
+1. **If the user hasn't pasted yet, prompt them:** *"Paste your requirements — Jira epic body, Notion doc, Word content, plain bullets, anything textual. I'll parse and structure it for DNG."*
+
+2. **Parse the pasted text into FIVE buckets** (the prompt body has full details):
+   - **Functional reqs** — atomic 'shall' statements about what the system does
+   - **Non-functional reqs** — performance, security, retention, observability, etc.
+   - **Acceptance criteria** — HOLD for ETM later; do NOT push to DNG
+   - **Constraints / Risks / Assumptions** — ask once if user wants them; default skip
+   - **Skipped** — Business Goal/Value, In/Out of Scope, DoD, project metadata
+
+3. **Show a structured preview** with counts + every parsed item listed in full. Note what was skipped and why so the user knows you didn't miss it.
+
+4. **Suggest a module name** based on the content's subject if user didn't provide one. Propose, don't impose.
+
+5. **Wait for explicit approval** — *"looks good"* / *"ship it"* / *"yes push"* — same write-gate pattern as everywhere else. If the user wants edits, apply them and re-preview.
+
+6. **On approval**, call `create_requirements` ONCE with `module_name=...` set so the module is auto-created and reqs auto-bind. No separate `create_module` call needed.
+
+7. **Surface direct links** — module URL + every requirement URL as markdown links. ELM-savvy users will click in to verify; chat-native users can ignore.
+
+8. **Offer next steps:**
+   - *"Want me to create EWM tasks for these requirements?"* (Step 3d)
+   - *"Want me to create ETM test cases? I'll use the held acceptance criteria + add any missing ones."* (Step 3e)
+   - *"Want a baseline snapshot of the module?"* (if config mgmt is enabled)
+
+#### Anti-patterns to avoid
+
+- ❌ Re-wording the user's requirements when they explicitly want their original text. Preserve the wording. Convert to atomic shall-statements ONLY where the input is non-atomic (e.g. "ingest payloads and persist them" → 2 reqs).
+- ❌ Pushing acceptance criteria as DNG requirements. ACs go in test cases.
+- ❌ Pushing Business Goal / Risks / Assumptions / DoD as DNG requirements. They're project metadata.
+- ❌ Pushing without preview + approval.
+- ❌ Calling `create_module` then `create_requirements` separately. Use `module_name` in `create_requirements` for auto-bind.
+- ❌ Inflating the count by splitting one idea into multiple reqs to look thorough. Be honest with the count.
 
 ### After Any Path
 Ask: "Want to do anything else? I can read from another module, generate more requirements (single-tier or tiered), create tasks or test cases, or switch projects."
