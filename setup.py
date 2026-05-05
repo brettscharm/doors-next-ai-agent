@@ -293,12 +293,12 @@ def write_claude_code(py_exe: str, home: Path) -> list[tuple[str, str, Path]]:
 
     # 1) User-scope file: ~/.claude.json
     user_path = home / ".claude.json"
-    status = merge_into(user_path, "mcpServers", "doors-next", entry)
+    status = merge_into(user_path, "mcpServers", "elm-mcp", entry)
     results.append(("Claude Code (user, ~/.claude.json)", status, user_path))
 
     # 2) Project-scope file: <project>/.mcp.json
     proj_path = HERE / ".mcp.json"
-    status = merge_into(proj_path, "mcpServers", "doors-next", entry)
+    status = merge_into(proj_path, "mcpServers", "elm-mcp", entry)
     results.append(("Claude Code (project, .mcp.json)", status, proj_path))
     return results
 
@@ -322,7 +322,7 @@ def write_vscode(py_exe: str) -> list[tuple[str, str, Path]]:
     """
     entry = make_server_entry(py_exe, with_cwd=False, include_type=True)
     path = HERE / ".vscode" / "mcp.json"
-    status = merge_into(path, "servers", "doors-next", entry)
+    status = merge_into(path, "servers", "elm-mcp", entry)
     return [("VS Code (workspace, .vscode/mcp.json)", status, path)]
 
 
@@ -339,11 +339,11 @@ def write_cursor(py_exe: str, home: Path) -> list[tuple[str, str, Path]]:
     entry = make_server_entry(py_exe, with_cwd=False, include_type=False)
     results = []
     proj_path = HERE / ".cursor" / "mcp.json"
-    status = merge_into(proj_path, "mcpServers", "doors-next", entry)
+    status = merge_into(proj_path, "mcpServers", "elm-mcp", entry)
     results.append(("Cursor (workspace, .cursor/mcp.json)", status, proj_path))
 
     user_path = home / ".cursor" / "mcp.json"
-    status = merge_into(user_path, "mcpServers", "doors-next", entry)
+    status = merge_into(user_path, "mcpServers", "elm-mcp", entry)
     results.append(("Cursor (user, ~/.cursor/mcp.json)", status, user_path))
     return results
 
@@ -423,14 +423,14 @@ def write_bob(py_exe: str, home: Path) -> list[tuple[str, str, Path]]:
     global_path = home / ".bob" / "mcp_settings.json"
     results.append((
         "Bob (~/.bob/mcp_settings.json, global)",
-        merge_into(global_path, "mcpServers", "doors-next", entry),
+        merge_into(global_path, "mcpServers", "elm-mcp", entry),
         global_path,
     ))
     # Project-scoped Bob config (lives next to the cloned repo)
     project_path = HERE / ".bob" / "mcp.json"
     results.append((
         "Bob (<project>/.bob/mcp.json, project)",
-        merge_into(project_path, "mcpServers", "doors-next", entry),
+        merge_into(project_path, "mcpServers", "elm-mcp", entry),
         project_path,
     ))
     return results
@@ -446,7 +446,7 @@ def write_windsurf(py_exe: str, home: Path) -> list[tuple[str, str, Path]]:
     """
     entry = make_server_entry(py_exe, with_cwd=False, include_type=False)
     path = home / ".codeium" / "windsurf" / "mcp_config.json"
-    status = merge_into(path, "mcpServers", "doors-next", entry)
+    status = merge_into(path, "mcpServers", "elm-mcp", entry)
     return [("Windsurf (~/.codeium/windsurf/mcp_config.json)", status, path)]
 
 
@@ -731,7 +731,7 @@ def print_config() -> int:
     always_allow = list(_BOB_ALWAYS_ALLOW) + ["update_elm_mcp"]
     config = {
         "mcpServers": {
-            "doors-next": {
+            "elm-mcp": {
                 "command": py_path,
                 "args": [server_path],
                 "alwaysAllow": always_allow,

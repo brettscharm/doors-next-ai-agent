@@ -1384,38 +1384,23 @@ class DOORSNextClient:
     def add_to_module(self, module_url: str, requirement_urls: List[str]) -> Dict:
         """Bind one or more existing requirements to a DNG module.
 
-        Uses DNG's Module Structure API (the writable surface that the
-        legacy oslc_rm:uses route doesn't expose). Pattern, all live-verified:
-
-          1. GET <module_url> with header DoorsRP-Request-Type: public 2.0
-             — returns the new-style RDF that includes a *:structure ref
-          2. GET <structure_url> with same header
-             — returns the structure RDF + ETag
-          3. Modify the structure root: replace its childBindings (which
-             starts as rdf:nil for an empty module, or a Collection for
-             a populated one) with a Collection that includes the new
-             Bindings.
-          4. PUT <structure_url> with If-Match — returns 202 + task tracker
-          5. Poll task tracker until oslc_auto:state != inProgress
-
-        Each new Binding requires:
-          rdf:about="<structure_url>#N"          (server uses to mint UUID)
-          oslc_config:component                  (the GCM component)
-          j.0:boundArtifact                      (the requirement URL)
-          j.0:module                             (the parent module URL)
-          j.0:childBindings rdf:resource=...#nil  (leaf — no nested children)
-
-        Critical headers:
-          DoorsRP-Request-Type: public 2.0       (camelCase, NOT DOORS-RP-)
-          vvc.configuration: <stream_url>        (GCM stream)
-          DO NOT send OSLC-Core-Version or Configuration-Context
+        TWO-PATH IMPLEMENTATION (v0.5.4+):
+          - Primary: DNG Structure API (requires GCM/config-mgmt). Works
+            on ELM-Hub-style projects where configuration management is
+            on. Pattern: GET module → discover /structure → modify
+            childBindings → PUT-with-If-Match → poll task tracker.
+          - Fallback: legacy oslc_rm:uses PUT directly to the module
+            artifact. This is what older DNG installs and non-config-
+            managed projects support. Activated when the Structure API
+            indicates "non-GCM project" (no oslc_config:component on
+            the module).
 
         Args:
             module_url: The module artifact URL (.../resources/MD_*).
             requirement_urls: Existing requirement URLs to bind.
 
         Returns:
-            {'added': int, 'module_url': str} on success
+            {'added': int, 'module_url': str, 'method': str} on success
             {'error': str, 'module_url': str} on failure.
         """
         self._ensure_auth()
@@ -1435,8 +1420,29 @@ class DOORSNextClient:
             comp_match = re.search(
                 r'oslc_config:component\s+rdf:resource="([^"]+)"', mod_resp.text)
             if not comp_match:
-                return {'error': 'Module has no oslc_config:component (non-GCM project?)',
-                        'module_url': module_url}
+                # NON-GCM project — fall through to the legacy oslc_rm:uses path
+                fallback = self._add_to_module_legacy(module_url, requirement_urls,
+                                                       initial_rdf=mod_resp.text)
+                if fallback and 'error' not in fallback:
+                    fallback['method'] = 'legacy_oslc_rm_uses'
+                    return fallback
+                # Both paths failed — return the legacy error so the
+                # caller knows it's a no-programmatic-binding server
+                fb_err = (fallback.get('error', 'unknown')
+                          if fallback else 'unknown')
+                return {
+                    'error': (f'This DNG project does not support '
+                              f'programmatic module binding. Modern '
+                              f'Structure API requires configuration '
+                              f'management (which is not enabled), and '
+                              f'the legacy oslc_rm:uses path also failed: '
+                              f'{fb_err}. To bind these requirements, '
+                              f'either (a) ask your DNG admin to enable '
+                              f'configuration management on the project, '
+                              f'or (b) drag the artifacts into the module '
+                              f'manually in the DNG UI.'),
+                    'module_url': module_url,
+                }
             component_url = comp_match.group(1)
 
             cfg_resp = self.session.get(
@@ -1686,6 +1692,127 @@ class DOORSNextClient:
             return None
         except Exception:
             return None
+
+    def _add_to_module_legacy(self, module_url: str,
+                               requirement_urls: List[str],
+                               initial_rdf: Optional[str] = None) -> Dict:
+        """Legacy module-binding path — adds `oslc_rm:uses` triples
+        directly to the module artifact via PUT-with-If-Match. Used as
+        a fallback when the modern Structure API path is unavailable
+        (non-GCM / non-config-managed projects).
+
+        This was the original DNG binding mechanism before the Module
+        Structure API. On config-managed projects it's been locked
+        down; on non-config-managed projects it may still work. v0.5.4
+        tries it as a fallback specifically because the user reported
+        being stuck on a project where config-mgmt isn't enabled.
+
+        Returns:
+            {'added': int, 'module_url': str} on success.
+            {'error': str, 'module_url': str} on failure.
+        """
+        try:
+            # Re-fetch the module if we don't already have its body — we
+            # need the ETag for the If-Match PUT.
+            headers_get = {
+                'Accept': 'application/rdf+xml',
+                'OSLC-Core-Version': '2.0',
+                'X-Requested-With': 'XMLHttpRequest',
+            }
+            if initial_rdf is None:
+                resp = self.session.get(module_url, headers=headers_get,
+                                        timeout=self._TIMEOUT)
+            else:
+                # Re-fetch for ETag (initial_rdf came from a different
+                # GET that may have used different headers / no ETag).
+                resp = self.session.get(module_url, headers=headers_get,
+                                        timeout=self._TIMEOUT)
+            if resp.status_code != 200:
+                return {
+                    'error': (f'Legacy fallback: failed to GET module: '
+                              f'HTTP {resp.status_code}'),
+                    'module_url': module_url,
+                }
+            etag = resp.headers.get('ETag', '')
+            if not etag:
+                return {
+                    'error': 'Legacy fallback: module GET returned no ETag',
+                    'module_url': module_url,
+                }
+
+            rdf_str = resp.content.decode('utf-8')
+
+            # Find which existing requirement URLs are already in the
+            # module via oslc_rm:uses triples — skip duplicates.
+            existing = set(re.findall(
+                r'oslc_rm:uses\s+rdf:resource="([^"]+)"', rdf_str))
+            to_add = [u for u in requirement_urls if u not in existing]
+            if not to_add:
+                return {
+                    'added': 0, 'module_url': module_url,
+                    'note': 'all requirements already bound (legacy path)',
+                }
+
+            # Inject the triples. Find the closing tag of the module
+            # description and put new uses triples just before it.
+            new_triples = "".join(
+                f'\n    <oslc_rm:uses rdf:resource="{u}"/>'
+                for u in to_add
+            )
+
+            # The RDF might not declare oslc_rm namespace — inject it
+            # if missing.
+            if 'xmlns:oslc_rm=' not in rdf_str:
+                rdf_str = re.sub(
+                    r'<rdf:RDF\b',
+                    '<rdf:RDF xmlns:oslc_rm="http://open-services.net/ns/rm#"',
+                    rdf_str, count=1,
+                )
+
+            # Inject before the last </oslc_rm:Requirement> or </rdf:Description>
+            # whichever describes this module
+            inject_pat = re.compile(
+                rf'(rdf:about="{re.escape(module_url)}".*?)(</[A-Za-z0-9_:]+>)',
+                re.DOTALL,
+            )
+            m = inject_pat.search(rdf_str)
+            if m:
+                rdf_str = (rdf_str[:m.start()]
+                           + m.group(1) + new_triples + '\n  '
+                           + m.group(2)
+                           + rdf_str[m.end():])
+            else:
+                # Fallback — put before </rdf:RDF>
+                rdf_str = rdf_str.replace(
+                    '</rdf:RDF>',
+                    f'  <rdf:Description rdf:about="{module_url}">'
+                    f'{new_triples}\n  </rdf:Description>\n</rdf:RDF>',
+                    1,
+                )
+
+            put_resp = self.session.put(
+                module_url,
+                data=rdf_str.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'If-Match': etag,
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if put_resp.status_code in (200, 204):
+                return {'added': len(to_add), 'module_url': module_url}
+            err = self._extract_oslc_error(put_resp.text)
+            return {
+                'error': (f'Legacy PUT failed: HTTP {put_resp.status_code}'
+                          + (f': {err}' if err else '')),
+                'module_url': module_url,
+            }
+        except Exception as e:
+            return {'error': f'Legacy fallback exception: {e}',
+                    'module_url': module_url}
 
     def find_folder(self, project_url: str, folder_name: str) -> Optional[Dict]:
         """Find an existing folder by name anywhere in a project's folder

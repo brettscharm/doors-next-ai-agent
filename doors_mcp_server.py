@@ -57,7 +57,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("doors-next")
+logger = logging.getLogger("elm-mcp")
 from mcp.server import Server
 from mcp.types import (
     Tool, TextContent,
@@ -74,10 +74,10 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
-app = Server("doors-next-server")
+app = Server("elm-mcp")
 
 # ── Auto-update on server startup ─────────────────────────────
 # When Bob (or any MCP host) launches this server, we transparently
