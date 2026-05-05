@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -2670,6 +2670,47 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="create_tasks",
+            description=(_WRITE_GATE +
+                "BATCH version of create_task — creates N EWM tasks in "
+                "ONE tool call (one user-approval click instead of N). "
+                "Use this in build_project Phase 3, /full-lifecycle "
+                "Phase 2, or any time you're creating multiple tasks "
+                "at once. Each task in the list takes the same args as "
+                "create_task (title, description, requirement_url). "
+                "Returns the full list of created URLs plus aggregate "
+                "stats. Loops internally; same per-task error handling. "
+                "ALWAYS pass requirement_url on each item when the task "
+                "implements a DNG requirement."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ewm_project": {
+                        "type": "string",
+                        "description": "EWM project number or name. Applies to every task in the batch."
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of tasks to create. Each item is {title, description, requirement_url}.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "requirement_url": {
+                                    "type": "string",
+                                    "description": "STRONGLY RECOMMENDED. Full URL of the DNG requirement this task implements. Without it the task is unlinked."
+                                }
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["ewm_project", "tasks"]
+            }
+        ),
+        Tool(
             name="create_test_case",
             description=(_WRITE_GATE +
                 "Create an ETM Test Case. "
@@ -2701,6 +2742,47 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["etm_project", "title"]
+            }
+        ),
+        Tool(
+            name="create_test_cases",
+            description=(_WRITE_GATE +
+                "BATCH version of create_test_case — creates N ETM "
+                "test cases in ONE tool call (one user-approval click "
+                "instead of N). Use this in build_project Phase 4, "
+                "/full-lifecycle Phase 3, or any time you're creating "
+                "multiple test cases at once. Each item takes the same "
+                "args as create_test_case (title, description, "
+                "requirement_url). Returns the full list of created "
+                "URLs plus aggregate stats. Loops internally; same "
+                "per-test error handling. ALWAYS pass requirement_url "
+                "on each item when the test validates a DNG requirement."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {
+                        "type": "string",
+                        "description": "ETM project number or name. Applies to every test case in the batch."
+                    },
+                    "test_cases": {
+                        "type": "array",
+                        "description": "List of test cases to create. Each item is {title, description, requirement_url}.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "requirement_url": {
+                                    "type": "string",
+                                    "description": "STRONGLY RECOMMENDED. Full URL of the DNG requirement this test validates."
+                                }
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["etm_project", "test_cases"]
             }
         ),
         Tool(
@@ -3455,8 +3537,9 @@ async def list_tools() -> list[Tool]:
 _TEAM_LOG_TOOLS_WRITE = {
     "create_module", "create_requirements", "update_requirement",
     "update_requirement_attributes", "create_baseline", "add_to_module",
-    "create_folder", "create_task", "create_defect", "update_work_item",
-    "transition_work_item", "create_test_case", "create_test_script",
+    "create_folder", "create_task", "create_tasks", "create_defect",
+    "update_work_item", "transition_work_item",
+    "create_test_case", "create_test_cases", "create_test_script",
     "create_test_result", "create_link", "link_workitem_to_external_url",
     "publish_build_state_to_dng", "generate_chart",
     "create_test_plan", "create_test_execution_record",
@@ -3858,21 +3941,36 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                     "current_phase=2, user_signal=<user's approval text>, "
                     "context='<comma-separated requirement URLs>')`."),
                 3: ("PHASE 3 — IMPLEMENTATION TASKS (EWM)",
-                    "Run BOB.md Step 3d. One EWM Task per System Requirement (skip "
-                    "Business/Stakeholder tiers if tiered). Verb-first titles. Brief "
-                    "task body — Objective + Deliverables + Dependencies. Don't copy "
-                    "the requirement body — it's already linked. Preview → user "
-                    "approval → create_task per task with requirement_url set "
-                    "verbatim from the requirement URL.\n\n"
+                    "Run BOB.md Step 3d. One EWM Task per System Requirement "
+                    "(skip Business/Stakeholder tiers if tiered). Verb-first "
+                    "titles. Brief task body — Objective + Deliverables + "
+                    "Dependencies. Don't copy the requirement body — it's "
+                    "already linked.\n\n"
+                    "**Use `create_tasks` (BATCH/plural), NOT `create_task` "
+                    "per req.** With 14+ requirements, calling create_task in "
+                    "a loop forces the user to approve each one individually "
+                    "in Bob (per-call approval friction the user has "
+                    "complained about). create_tasks creates all N in ONE "
+                    "tool call → ONE approval click. Pass `tasks=[...]` with "
+                    "{title, description, requirement_url} per item, "
+                    "requirement_url verbatim from the Phase 2 output.\n\n"
+                    "Preview → user approval → call create_tasks ONCE.\n\n"
                     "After tasks are pushed, call `build_project_next("
                     "current_phase=3, user_signal=<user's reply>, "
                     "context='<task URLs>')`."),
                 4: ("PHASE 4 — TEST CASES (ETM)",
-                    "Run BOB.md Step 3e. One Test Case per System Requirement, with "
-                    "full Preconditions / Test Steps / Pass-Fail Criteria — these DO "
-                    "belong in test cases. Optionally also create_test_script for "
-                    "detailed numbered procedures linked via test_case_url. Preview "
-                    "→ user approval → push linked.\n\n"
+                    "Run BOB.md Step 3e. One Test Case per System "
+                    "Requirement, with full Preconditions / Test Steps / "
+                    "Pass-Fail Criteria — these DO belong in test cases.\n\n"
+                    "**Use `create_test_cases` (BATCH/plural), NOT "
+                    "`create_test_case` per req.** Same reasoning as "
+                    "Phase 3 — one tool call instead of N approval clicks. "
+                    "Pass `test_cases=[...]` with {title, description, "
+                    "requirement_url} per item.\n\n"
+                    "Optionally also create_test_script for detailed numbered "
+                    "procedures linked via test_case_url (this stays singular; "
+                    "scripts are typically one-per-test, not batch).\n\n"
+                    "Preview → user approval → call create_test_cases ONCE.\n\n"
                     "After tests are pushed, call `build_project_next("
                     "current_phase=4, user_signal=<user's reply>, "
                     "context='<test case URLs>')`."),
@@ -6023,6 +6121,76 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                     "This may be a permissions issue — try a different EWM project."
                 ))]
 
+        # ── create_tasks (BATCH version) ───────────────────────
+        elif name == "create_tasks":
+            ewm_proj = arguments.get("ewm_project", "")
+            tasks_data = arguments.get("tasks", []) or []
+            if not ewm_proj or not tasks_data:
+                return [TextContent(type="text", text=(
+                    "Error: ewm_project and tasks (non-empty list) are required."
+                ))]
+            if not _ewm_projects_cache:
+                _ewm_projects_cache = client.list_ewm_projects()
+            project = _find_by_identifier(_ewm_projects_cache, ewm_proj)
+            if not project:
+                return [TextContent(type="text", text=(
+                    f"EWM project not found: '{ewm_proj}'."
+                ))]
+
+            created = []
+            failed = []
+            for t in tasks_data:
+                t_title = (t.get("title") or "").strip()
+                if not t_title:
+                    failed.append({"title": "(no title)", "error": "missing title"})
+                    continue
+                t_desc = t.get("description") or ""
+                t_req = t.get("requirement_url") or None
+                result = client.create_ewm_task(
+                    service_provider_url=project['url'],
+                    title=t_title,
+                    description=t_desc,
+                    requirement_url=t_req,
+                )
+                if result and 'error' not in result:
+                    created.append({
+                        "title": result.get('title', t_title),
+                        "url": result.get('url', ''),
+                        "requirement_url": t_req or '',
+                        "backlink_warning": result.get('backlink_warning', ''),
+                    })
+                else:
+                    failed.append({
+                        "title": t_title,
+                        "error": result.get('error', 'unknown') if result else 'unknown',
+                    })
+
+            lines = [
+                f"# Created {len(created)} of {len(tasks_data)} tasks in '{project['title']}'\n",
+            ]
+            if failed:
+                lines.append(f"## ⚠️ {len(failed)} failed\n")
+                for f in failed:
+                    lines.append(f"- **{f['title']}** — {f['error']}")
+                lines.append("")
+            lines.append("## Created tasks\n")
+            for c in created:
+                req_note = (
+                    f" → linked to {c['requirement_url']}"
+                    if c['requirement_url'] else " (unlinked — no requirement_url provided)"
+                )
+                lines.append(f"- [{c['title']}]({c['url']}){req_note}")
+                if c.get('backlink_warning'):
+                    lines.append(f"  ⚠️ back-link warning: {c['backlink_warning']}")
+            lines.append("")
+            lines.append(
+                "**Surface every URL above as a markdown link to the user.** "
+                "If you're in build_project Phase 3, the run state has captured "
+                "these URLs automatically; advance via build_project_next when "
+                "the user confirms."
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
         # ── create_test_case (ETM) ────────────────────────────
         elif name == "create_test_case":
             etm_proj = arguments.get("etm_project", "")
@@ -6075,6 +6243,76 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"{error_detail}\n\n"
                     "This may be a permissions issue — try a different ETM project."
                 ))]
+
+        # ── create_test_cases (BATCH version) ─────────────────
+        elif name == "create_test_cases":
+            etm_proj = arguments.get("etm_project", "")
+            cases_data = arguments.get("test_cases", []) or []
+            if not etm_proj or not cases_data:
+                return [TextContent(type="text", text=(
+                    "Error: etm_project and test_cases (non-empty list) are required."
+                ))]
+            if not _etm_projects_cache:
+                _etm_projects_cache = client.list_etm_projects()
+            project = _find_by_identifier(_etm_projects_cache, etm_proj)
+            if not project:
+                return [TextContent(type="text", text=(
+                    f"ETM project not found: '{etm_proj}'."
+                ))]
+
+            created = []
+            failed = []
+            for tc in cases_data:
+                tc_title = (tc.get("title") or "").strip()
+                if not tc_title:
+                    failed.append({"title": "(no title)", "error": "missing title"})
+                    continue
+                tc_desc = tc.get("description") or ""
+                tc_req = tc.get("requirement_url") or None
+                result = client.create_test_case(
+                    service_provider_url=project['url'],
+                    title=tc_title,
+                    description=tc_desc,
+                    requirement_url=tc_req,
+                )
+                if result and 'error' not in result:
+                    created.append({
+                        "title": result.get('title', tc_title),
+                        "url": result.get('url', ''),
+                        "requirement_url": tc_req or '',
+                        "backlink_warning": result.get('backlink_warning', ''),
+                    })
+                else:
+                    failed.append({
+                        "title": tc_title,
+                        "error": result.get('error', 'unknown') if result else 'unknown',
+                    })
+
+            lines = [
+                f"# Created {len(created)} of {len(cases_data)} test cases in '{project['title']}'\n",
+            ]
+            if failed:
+                lines.append(f"## ⚠️ {len(failed)} failed\n")
+                for f in failed:
+                    lines.append(f"- **{f['title']}** — {f['error']}")
+                lines.append("")
+            lines.append("## Created test cases\n")
+            for c in created:
+                req_note = (
+                    f" → validates {c['requirement_url']}"
+                    if c['requirement_url'] else " (unlinked — no requirement_url provided)"
+                )
+                lines.append(f"- [{c['title']}]({c['url']}){req_note}")
+                if c.get('backlink_warning'):
+                    lines.append(f"  ⚠️ back-link warning: {c['backlink_warning']}")
+            lines.append("")
+            lines.append(
+                "**Surface every URL above as a markdown link to the user.** "
+                "If you're in build_project Phase 4, the run state has captured "
+                "these URLs automatically; advance via build_project_next when "
+                "the user confirms."
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
 
         # ── create_test_script (ETM) ──────────────────────────
         elif name == "create_test_script":
@@ -6981,7 +7219,7 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (60 tools, 9 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (62 tools, 10 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

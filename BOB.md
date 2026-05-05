@@ -2,7 +2,7 @@
 
 > **DISCLAIMER:** This is a personal passion project. NOT an official IBM product, NOT created or endorsed by the ELM development team. Use at your own risk. IBM, DOORS Next, ELM, EWM, and ETM are trademarks of IBM Corporation.
 
-This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 60 tools + 10 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
+This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 62 tools + 10 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
 
 ## COMMON TASKS — the user's intent → your starting point
 
@@ -36,6 +36,20 @@ Required behavior:
 4. **Once binding is verified** (call `get_module_requirements` and see the reqs in the module), call `build_project_status(run_id=..., clear_phase_2_bind_failed=true)` to clear the gate, then resume the build flow normally.
 
 **Anti-pattern (the one observed in the field):** Bob marks a `bind_warning` as a *"Note: There was a warning about module binding, but all requirements were successfully created in the folder"* footnote and proceeds to Phase 3. This is wrong. The reqs are NOT successfully created if they're loose-folder when the user expected a module — Phase 5 review is broken, drift detection at Phase 6 has nothing to compare against, and the build flow's claim "module: X — 14 reqs" is untrue. Don't do this.
+
+## 🔁 ALWAYS use BATCH tools when creating multiple artifacts
+
+When creating N artifacts of the same type, **use the plural/batch tool**, not the singular tool in a loop. Bob's per-call approval prompts mean N singular calls = N approval clicks for the user — real friction the user has explicitly complained about. The batch tools collapse this to ONE approval click.
+
+| If you need to create... | Use the BATCH tool | NOT |
+|---|---|---|
+| Many requirements (in build flow Phase 2, /import-requirements, etc.) | `create_requirements` (already plural — accepts a list) | `create_requirement` per req in a loop |
+| Many EWM tasks (in build flow Phase 3, /full-lifecycle Phase 2) | **`create_tasks`** | `create_task` per task |
+| Many ETM test cases (in build flow Phase 4, /full-lifecycle Phase 3) | **`create_test_cases`** | `create_test_case` per test |
+
+The singular versions (`create_task`, `create_test_case`) still exist for one-off creation — useful when the user only wants a single artifact. But in any context where you'd otherwise iterate, switch to plural.
+
+**Rule:** if you find yourself about to write a Python `for req in reqs: create_task(...)`-shaped instruction, STOP and use `create_tasks(tasks=[...])` instead. Same for tests.
 
 ## TRIGGER PHRASES — match user intent to the right workflow
 
