@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -688,8 +688,9 @@ async def list_prompts() -> list[Prompt]:
         Prompt(
             name="import-work-item",
             description=(
-                "Brownfield work-item import — user provides a PDF (Jira epic "
-                "export, Azure DevOps work item, etc.) and AI parses the "
+                "Brownfield work-item import — user provides EITHER a PDF "
+                "path OR pasted text (Jira epic export, Azure DevOps work "
+                "item, copy-paste from any source) and AI parses the "
                 "complete work-item graph into ELM: an EWM work item for the "
                 "main item, DNG requirements for the functional/NFR sections, "
                 "ETM test cases for the acceptance criteria, EWM child stories "
@@ -697,13 +698,20 @@ async def list_prompts() -> list[Prompt]:
                 "all of them. Performs gap detection (vague NFRs, untestable "
                 "ACs, missing fields) and surfaces decision points (work item "
                 "type — picked from the project's actual list, NEVER guessed). "
+                "Pasted-text path is the workaround for hosts (like IBM Bob) "
+                "whose chat UI doesn't natively extract PDF attachments. "
                 "Composes naturally with /build-project for code generation "
                 "after import."
             ),
             arguments=[
                 PromptArgument(
                     name="pdf_path",
-                    description="Absolute path to the work-item PDF (Jira epic export, ADO work item, etc.). Optional; AI will ask if not provided.",
+                    description="Absolute path to the work-item PDF on the user's machine. Optional. Use this when the user can give you a path; otherwise prefer `content` for pasted text. AI will ask if neither is provided.",
+                    required=False,
+                ),
+                PromptArgument(
+                    name="content",
+                    description="Raw text of the work item (e.g. user copy-pasted the body of a Jira epic into chat). Optional; alternative to `pdf_path`. Use this whenever the user provides text directly — IBM Bob in particular doesn't auto-extract PDF attachments, so paste is often the only path.",
                     required=False,
                 ),
                 PromptArgument(
@@ -1039,6 +1047,7 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
 
     elif name == "import-work-item":
         pdf_path = args.get("pdf_path", "")
+        content = args.get("content", "")
         dng_proj = args.get("dng_project", "")
         ewm_proj = args.get("ewm_project", "")
         etm_proj = args.get("etm_project", "")
@@ -1046,26 +1055,57 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
 
         intro = (
             "The user wants to import a complete work-item graph (epic + "
-            "stories + reqs + tests + cross-links) from a PDF into ELM. "
-            "This is the BROWNFIELD-COMPLETE path — multi-artifact, "
-            "multi-tool. The PDF is typically a Jira epic export, an "
-            "Azure DevOps work item, or similar. You preserve the user's "
-            "wording wherever possible — you structure, don't rewrite.\n\n"
+            "stories + reqs + tests + cross-links) into ELM from EITHER a "
+            "PDF path OR pasted text. This is the BROWNFIELD-COMPLETE "
+            "path — multi-artifact, multi-tool. The source is typically a "
+            "Jira epic export, an Azure DevOps work item, or similar. You "
+            "preserve the user's wording wherever possible — you "
+            "structure, don't rewrite.\n\n"
         )
 
-        if pdf_path:
+        if content:
+            preview = content[:400] + ("…" if len(content) > 400 else "")
             input_block = (
-                f"PDF to import: {pdf_path}\n\n"
-                f"Step 1: call `extract_pdf` with this path. You'll get the "
-                f"full text including title, metadata, sections, comments. "
-                f"Don't ask the user — just extract.\n\n"
+                f"## Source: pasted text ({len(content)} chars)\n\n"
+                f"The user already pasted the work-item body. Skip "
+                f"`extract_pdf` entirely — go straight to parsing.\n\n"
+                f"--- PASTED CONTENT (preview, first 400 chars) ---\n"
+                f"{preview}\n"
+                f"--- END PREVIEW (full text is in your prompt context) ---\n\n"
+                f"Parse the FULL pasted text below into the five categories "
+                f"described in the next section. Don't truncate to the "
+                f"preview.\n\n"
+                f"--- FULL PASTED CONTENT ---\n{content}\n"
+                f"--- END FULL CONTENT ---\n\n"
+            )
+        elif pdf_path:
+            input_block = (
+                f"## Source: PDF at `{pdf_path}`\n\n"
+                f"Step 1: call `extract_pdf(file_path=\"{pdf_path}\")`. "
+                f"You'll get the full text including title, metadata, "
+                f"sections, comments. Don't ask the user — just extract.\n\n"
+                f"If `extract_pdf` errors with 'file not found' or similar, "
+                f"the user may have given a wrong path. Tell them: *'I "
+                f"couldn't read the PDF at that path. Two options: (a) "
+                f"send me the right absolute path, or (b) open the PDF in "
+                f"Preview/Acrobat, Cmd-A → Cmd-C → paste the text into "
+                f"chat — I'll parse it just fine.'*\n\n"
             )
         else:
             input_block = (
-                "The user hasn't provided a PDF path yet. Ask them once: "
-                "*\"Drop the absolute path to the work-item PDF — Jira epic "
-                "export, Azure DevOps work item, anything similar.\"* Wait "
-                "for the path, then call `extract_pdf`.\n\n"
+                "## Source: not yet provided\n\n"
+                "The user hasn't given a PDF path or pasted content. Ask "
+                "them once, OFFERING BOTH OPTIONS:\n\n"
+                "  *'I can import a work item two ways:*\n"
+                "  *1. Tell me the absolute path to the PDF (e.g. "
+                "  `~/Downloads/OMS-28894.pdf`) and I'll extract it.*\n"
+                "  *2. Open the PDF, copy all the text, paste it here. "
+                "  Works for IBM Bob too where PDF attachments aren't "
+                "  auto-readable.*\n"
+                "  *Which do you prefer?'*\n\n"
+                "Wait for their answer. If they paste text, treat it as "
+                "the `content` arg path. If they give a path, call "
+                "`extract_pdf` with it.\n\n"
             )
 
         hint_block = (
@@ -4200,10 +4240,39 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if name == "extract_pdf":
             file_path = arguments.get("file_path", "").strip()
             if not file_path:
-                return [TextContent(type="text", text="Error: file_path is required.")]
+                return [TextContent(type="text", text=(
+                    "Error: file_path is required.\n\n"
+                    "**Bob workaround:** if the user attached a PDF to chat "
+                    "but Bob can't access the file content, ask them to "
+                    "either (a) tell you the absolute path on their machine "
+                    "(e.g. `~/Downloads/their-file.pdf`), or (b) open the "
+                    "PDF in Preview/Acrobat, Cmd-A → Cmd-C → paste the text "
+                    "into chat. For pasted text, route to "
+                    "`/import-requirements` (single-artifact) or "
+                    "`/import-work-item` with the `content` argument "
+                    "(multi-artifact)."
+                ))]
 
             if not os.path.exists(file_path):
-                return [TextContent(type="text", text=f"Error: File not found: {file_path}")]
+                return [TextContent(type="text", text=(
+                    f"Error: File not found: {file_path}\n\n"
+                    f"**Likely causes & fixes:**\n"
+                    f"- Path is relative — pass an absolute path "
+                    f"(e.g. `/Users/<you>/Downloads/file.pdf`).\n"
+                    f"- Tilde wasn't expanded — replace `~/` with the full "
+                    f"home dir.\n"
+                    f"- Bob's chat shows a PDF attachment but the actual "
+                    f"file isn't on disk — Bob's UI doesn't auto-save "
+                    f"attachments. Ask the user to save the PDF to disk "
+                    f"and share the path.\n"
+                    f"- File doesn't exist — confirm with `ls` or have the "
+                    f"user double-check.\n\n"
+                    f"**Paste workaround:** if the path is broken or Bob "
+                    f"can't see the file at all, ask the user to copy-"
+                    f"paste the PDF's text into chat. `/import-requirements` "
+                    f"and `/import-work-item` both accept pasted content "
+                    f"directly."
+                ))]
 
             try:
                 import fitz  # PyMuPDF
@@ -4224,7 +4293,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 if not pages:
                     return [TextContent(type="text", text=(
                         f"No text found in '{os.path.basename(file_path)}'. "
-                        "The PDF may be image-only (scanned without OCR)."
+                        "The PDF may be image-only (scanned without OCR). "
+                        "Workaround: if the user can see the PDF content "
+                        "themselves, ask them to copy-paste the text into "
+                        "chat — `/import-requirements` and `/import-work-item` "
+                        "both accept pasted content directly."
                     ))]
 
                 full_text = "\n\n".join(pages)
