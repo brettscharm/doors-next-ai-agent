@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -2032,12 +2032,20 @@ async def list_tools() -> list[Tool]:
                 "URLs), approval signals received per phase, drift state if "
                 "Phase 6 has run. Use this when the user asks *'where am I in "
                 "the build?'*, *'what runs are active?'*, or *'what did I do "
-                "in run X?'*. Read-only — no approval gate."
+                "in run X?'*. Mostly read-only. The optional "
+                "`clear_phase_2_bind_failed` flag is the recovery path "
+                "when a Phase 2 bind failure has been resolved — it "
+                "clears the lock so `build_project_next` will advance "
+                "from Phase 2 to Phase 3 again."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "Run id (optional). If omitted, lists all active runs."}
+                    "run_id": {"type": "string", "description": "Run id (optional). If omitted, lists all active runs."},
+                    "clear_phase_2_bind_failed": {
+                        "type": "boolean",
+                        "description": "Set true after manually resolving a Phase 2 bind failure (e.g. user ran add_to_module successfully or bound reqs in DNG UI). Clears the gate that blocks Phase 3 advance. Verify the reqs are actually in the module before clearing."
+                    }
                 },
                 "required": []
             }
@@ -3750,6 +3758,49 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"confirm with 'yes' before calling this tool."
                 ))]
 
+            # ── HARD GATE: if Phase 2 had a bind failure, refuse to
+            # advance to Phase 3. Bob has been observed barreling past
+            # bind warnings as if they were footnotes; this gate
+            # guarantees the build flow halts until the reqs are
+            # actually in a module.
+            if (run is not None
+                    and current_phase == 2
+                    and run.get("phase_2_bind_failed")):
+                bind_err = run.get("last_bind_failure", "(unknown)")
+                return [TextContent(type="text", text=(
+                    "🛑 PHASE GATE LOCKED — Phase 2 had a module-bind "
+                    "failure that hasn't been resolved.\n\n"
+                    "Phase 2 created the requirements but FAILED to "
+                    "bind them to a module. The error was:\n\n"
+                    f"```\n{bind_err}\n```\n\n"
+                    "Advancing to Phase 3 (creating EWM tasks linked to "
+                    "these requirements) would silently break the rest "
+                    "of the flow:\n"
+                    "- Phase 5 user-review depends on the user opening "
+                    "the module in DNG\n"
+                    "- Phase 6 drift detection compares against module "
+                    "contents\n"
+                    "- Without binding, the reqs are invisible from the "
+                    "module view\n\n"
+                    "**You MUST resolve the bind first.** Three options:\n"
+                    "1. Retry programmatically: call `add_to_module("
+                    "module_url, [requirement_urls])` with the URLs from "
+                    "the run state (`build_project_status(run_id="
+                    f"\"{run['run_id']}\")`).\n"
+                    "2. If `add_to_module` errors with config-management "
+                    "or PHASE_GATE issues, the project doesn't have DNG "
+                    "configuration management enabled. Tell the user to "
+                    "either enable it (DNG admin task), or open the "
+                    "module in DNG and drag the reqs in manually.\n"
+                    "3. Once the bind is resolved (you confirm via "
+                    "`get_module_requirements` showing the reqs in the "
+                    "module), call `build_project_status(run_id=..., "
+                    "clear_phase_2_bind_failed=true)` to clear the gate "
+                    "and re-attempt this advance.\n\n"
+                    "**Do not paraphrase this away. Do not advance. "
+                    "Tell the user explicitly that Phase 2 isn't done.**"
+                ))]
+
             # Phase 7 advances to 7.5 (review gate), then 7.5 to 8.
             if current_phase == 7:
                 next_phase = 7.5
@@ -3986,6 +4037,34 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
         # ── build_project_status ──────────────────────────────────
         if name == "build_project_status":
             run_id = (arguments.get("run_id") or "").strip()
+            clear_bind_lock = bool(arguments.get("clear_phase_2_bind_failed", False))
+
+            # Recovery path: caller is clearing the Phase 2 bind-failed
+            # lock after manually resolving the bind. Verify the run
+            # exists and surface what was cleared.
+            if clear_bind_lock and run_id:
+                run = _get_run(run_id)
+                if not run:
+                    return [TextContent(type="text", text=(
+                        f"Cannot clear bind lock — run `{run_id}` not found."
+                    ))]
+                had_lock = run.get("phase_2_bind_failed", False)
+                run["phase_2_bind_failed"] = False
+                run["last_bind_failure"] = ""
+                _persist_run(run)
+                return [TextContent(type="text", text=(
+                    f"# Phase 2 bind lock cleared\n\n"
+                    f"Run `{run_id}` is no longer blocked at Phase 2. "
+                    f"{'(Lock was set; cleared.)' if had_lock else '(Lock was not set; no-op.)'} "
+                    f"You can now call `build_project_next(current_phase=2, "
+                    f"user_signal=<verbatim approval>, run_id=\"{run_id}\")` "
+                    f"to advance to Phase 3.\n\n"
+                    f"⚠️ Only do this if you've actually verified the reqs "
+                    f"are in the module (e.g. via "
+                    f"`get_module_requirements`). Clearing the lock without "
+                    f"resolving the bind silently breaks the rest of the flow."
+                ))]
+
             if not run_id:
                 # No run_id → list all active runs
                 runs = _list_active_runs()
@@ -5666,18 +5745,89 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                     [r['url'] for r in created if r.get('url')],
                 )
 
-            # Build response — every artifact url is a markdown link so the
-            # user can click straight through to DNG. Do NOT collapse these
-            # into a generic "go check DOORS Next" line.
-            lines = [
-                f"# Requirements Created in '{project['title']}'\n",
-            ]
-            if module:
+            # Build response. CRITICAL: when bind fails, the warning
+            # must be the FIRST thing the AI sees — not buried at the
+            # bottom under 35 success lines. Same for the "no module"
+            # case. Anything else is too easy for the AI to skim past.
+            bind_failed = bool(module and bind_status and 'error' in bind_status)
+            no_module = (not module)
+
+            lines: list[str] = []
+
+            # ── HALT-LEVEL HEADER (when something went wrong) ──────
+            if bind_failed:
+                lines.append(
+                    f"# 🛑 PHASE INCOMPLETE — MODULE BIND FAILED\n"
+                )
+                lines.append(
+                    f"**{len(created)} requirements were created in folder "
+                    f"`{folder_name}`, but they are NOT IN ANY MODULE.** Bind "
+                    f"to module `{module['title']}` failed:\n\n"
+                    f"```\n{bind_status['error']}\n```\n"
+                )
+                lines.append(
+                    f"## ⛔ DO NOT ADVANCE THE BUILD FLOW\n\n"
+                    f"If this is part of a `/build-new-project` or "
+                    f"`/build-from-existing` run, **DO NOT call "
+                    f"`build_project_next(current_phase=2, ...)`** until "
+                    f"the bind is resolved. Phase 5 (user review in ELM) and "
+                    f"Phase 6 (drift detection) both depend on the reqs "
+                    f"being in the module — proceeding now silently breaks "
+                    f"the rest of the flow.\n\n"
+                    f"## Recovery options (in order)\n\n"
+                    f"1. **Retry the bind:** call `add_to_module("
+                    f"module_url=\"{module['url']}\", "
+                    f"requirement_urls=[<the URLs below>])`. If it "
+                    f"succeeds, proceed.\n"
+                    f"2. **If `add_to_module` errors with a config-management "
+                    f"or `PHASE_GATE` issue:** this project doesn't have "
+                    f"DNG configuration management enabled, so the Module "
+                    f"Structure API isn't available. Tell the user: *'Your "
+                    f"DNG project doesn't support programmatic module "
+                    f"binding. Either (a) ask your DNG admin to enable "
+                    f"configuration management on this project, or (b) "
+                    f"open the module link below in DNG, drag the 35 "
+                    f"requirements into it manually, then come back and "
+                    f"say continue.'*\n"
+                    f"3. **Module link to open in DNG for manual binding:** "
+                    f"[{module['title']}]({module['url']})\n"
+                )
+
+            elif no_module:
+                lines.append(
+                    f"# ⚠️ REQUIREMENTS CREATED WITHOUT A MODULE\n"
+                )
+                lines.append(
+                    f"**{len(created)} requirements were created in folder "
+                    f"`{folder_name}`, but the caller did NOT pass "
+                    f"`module_name`** — so they are loose-folder artifacts, "
+                    f"not visible from any module view in DNG.\n\n"
+                    f"## Was this intentional?\n\n"
+                    f"In 95% of cases the answer is no — the user wanted "
+                    f"these in a module. **Recommended action: ask the "
+                    f"user *'Should I bind these {len(created)} "
+                    f"requirements to a module? If yes, what should the "
+                    f"module be called?'* and then call `add_to_module` "
+                    f"with the URLs below.**\n\n"
+                    f"If the user really did want loose-folder reqs (rare; "
+                    f"e.g. they're appending to an existing module manually "
+                    f"in DNG), then proceed without binding.\n"
+                )
+
+            else:
+                # Happy path
+                lines.append(f"# Requirements Created in '{project['title']}'\n")
                 lines.append(f"**Module:** [{module['title']}]({module['url']})  ")
                 lines.append(f"  ↳ open this link in your browser to see the module with all its bindings.\n")
-            lines.append(f"**Folder:** {folder_name}\n")
-            lines.append(f"**Created {len(created)} of {len(reqs_data)} requirement(s):**\n")
+                added = bind_status.get('added', 0) if bind_status else 0
+                lines.append(
+                    f"**Bound to module:** {added} requirement(s) added.\n"
+                )
 
+            # ── Common: the actual list of URLs (always present so
+            #    recovery / handoff can use them) ──────────────────
+            lines.append(f"**Folder:** {folder_name}")
+            lines.append(f"**Created {len(created)} of {len(reqs_data)} requirement(s):**\n")
             for i, r in enumerate(created, 1):
                 if r.get('url'):
                     lines.append(f"{i}. [{r['title']}]({r['url']})")
@@ -5689,33 +5839,25 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                 for f_msg in failed:
                     lines.append(f"- {f_msg}")
 
-            if module and bind_status:
-                if 'error' in bind_status:
-                    lines.append(
-                        f"\n**Warning:** requirements were created but binding to module "
-                        f"failed: {bind_status['error']}. The requirements still exist in "
-                        f"the folder and can be added to the module manually in DNG."
-                    )
-                else:
-                    added = bind_status.get('added', 0)
-                    lines.append(
-                        f"\n**Bound to module:** {added} requirement(s) added to "
-                        f"[{module['title']}]({module['url']}). Click that link to "
-                        f"see them in order."
-                    )
-            elif not module:
-                lines.append(
-                    f"\n**Note:** no module_name was provided — these requirements live "
-                    f"in the folder '{folder_name}' as standalone artifacts. To make them "
-                    f"appear in a navigable document, re-run with `module_name` set."
-                )
-
             lines.append(
                 "\n---\n"
                 "**Surface ALL of the links above to the user as markdown links** — "
                 "do NOT paraphrase to a generic '/rm' landing page URL. Each link "
                 "above goes directly to the specific artifact."
             )
+
+            # Mark the active run state so build_project_next can refuse
+            # to advance past Phase 2 when bind failed.
+            if bind_failed or no_module:
+                for run in _RUNS.values():
+                    if run.get("current_phase", 0) == 2:
+                        run["phase_2_bind_failed"] = True
+                        run["last_bind_failure"] = (
+                            bind_status.get('error', '') if bind_status
+                            else 'no module_name passed; reqs are loose'
+                        )
+                        _persist_run(run)
+                        break
 
             return [TextContent(type="text", text="\n".join(lines))]
 

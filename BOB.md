@@ -25,6 +25,18 @@ The MCP has 60+ tools but the user mostly invokes ~10 starting points. Find thei
 
 **The point of this table:** the user doesn't experience "60 tools" — they experience these 12 starting points. Most flows take care of the rest internally. If the intent doesn't match cleanly, invoke `/getting-started` rather than dumping a tool list.
 
+## 🛑 NEVER ignore a module-bind warning from `create_requirements`
+
+When `create_requirements` returns a response that starts with `🛑 PHASE INCOMPLETE — MODULE BIND FAILED` or `⚠️ REQUIREMENTS CREATED WITHOUT A MODULE`, **HALT.** This is not a footnote. The reqs got created in DNG but they are NOT IN ANY MODULE — invisible from the module view, useless for Phase 5 review, and `build_project_next` will (since v0.5.1) refuse to advance from Phase 2 to Phase 3.
+
+Required behavior:
+1. **Tell the user the bind failed** in your reply, surfacing the actual error message verbatim.
+2. **Do NOT call `build_project_next(current_phase=2, ...)`.** If you do, the gate will reject it.
+3. **Offer the recovery path:** retry with `add_to_module(module_url, [requirement_urls])` first; if that errors with config-management or PHASE_GATE, the project doesn't support programmatic binding and the user has to either (a) ask their DNG admin to enable configuration management on the project, or (b) drag the reqs into the module manually in DNG.
+4. **Once binding is verified** (call `get_module_requirements` and see the reqs in the module), call `build_project_status(run_id=..., clear_phase_2_bind_failed=true)` to clear the gate, then resume the build flow normally.
+
+**Anti-pattern (the one observed in the field):** Bob marks a `bind_warning` as a *"Note: There was a warning about module binding, but all requirements were successfully created in the folder"* footnote and proceeds to Phase 3. This is wrong. The reqs are NOT successfully created if they're loose-folder when the user expected a module — Phase 5 review is broken, drift detection at Phase 6 has nothing to compare against, and the build flow's claim "module: X — 14 reqs" is untrue. Don't do this.
+
 ## TRIGGER PHRASES — match user intent to the right workflow
 
 Before doing anything, check what the user actually wants. The mapping below catches the most common misinterpretations. Match the user's phrase to the LEFT column, then run the path on the RIGHT.
