@@ -2,7 +2,7 @@
 
 > **DISCLAIMER:** This is a personal passion project. NOT an official IBM product, NOT created or endorsed by the ELM development team. Use at your own risk. IBM, DOORS Next, ELM, EWM, and ETM are trademarks of IBM Corporation.
 
-This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 51 tools + 9 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
+This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 55 tools + 9 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
 
 ## TRIGGER PHRASES — match user intent to the right workflow
 
@@ -20,9 +20,11 @@ Before doing anything, check what the user actually wants. The mapping below cat
 | "do the full lifecycle" / "requirements + tasks + tests" | **Step 3f: FULL LIFECYCLE Path** | merge it with build-project (full-lifecycle stops after Phase 3; build-project continues into code) |
 | "import this PDF" / "read these requirements from a PDF" | **Step 3c: PDF IMPORT** — call `extract_pdf(file_path=...)`. **If the user attached a PDF to chat but didn't give a path:** Bob's chat UI doesn't auto-extract PDF attachments — fall back to asking them to either (a) provide the absolute path, or (b) copy-paste the PDF text and route to `/import-requirements` or `/import-work-item content=...` instead. | extract the PDF yourself; use `extract_pdf` |
 | "import these requirements" / "I have requirements already" / "we wrote them in Jira/Notion/Word" / "/import-requirements" / user pastes a chunk of text that's clearly requirements (Jira epic body, bullet list of shall-statements, etc.) | **Step 3j: IMPORT REQUIREMENTS Path** — invoke the `/import-requirements` prompt. Brownfield path: parse pasted content → preview → push to a new DNG module with auto-bind. | re-write the user's requirements in your own words — preserve their text. Don't put acceptance criteria in DNG; hold them for ETM. Don't push without preview + approval. |
-| "import this work item" / "import this Jira epic" / "we have an epic in [PDF]" / "/import-work-item" / user provides a PDF or pastes a complete work-item body | **Step 3k: IMPORT WORK ITEM Path** — invoke `/import-work-item` with EITHER `pdf_path` (if the user gave a file path) OR `content` (if they pasted the text). The pasted-text path is the workaround for IBM Bob, whose chat UI doesn't auto-extract PDF attachments. Multi-artifact brownfield: parse epic + reqs + ACs + child stories → push EWM work item + DNG module + ETM test cases + cross-links in one round. | require a PDF path. Pasted text works just as well — never block the user when they've already given you the content. Don't guess work item types — call `get_ewm_workitem_types`. Don't try to match Jira assignees to EWM users — leave unset. |
+| "import this work item" / "import this Jira epic" / "we have an epic in [PDF]" / "/import-work-item" / **user shares a PDF that is clearly a work-item export (header with ID like 'OMS-XXXX', Type / Status / Reporter / Assignee fields, sections like Functional Requirements / Acceptance Criteria / Child Stories) — paste OR attached PDF OR file-path** | **Step 3k: IMPORT WORK ITEM Path** — invoke `/import-work-item` with EITHER `pdf_path` (if the user gave a file path) OR `content` (if they pasted the text). The pasted-text path is the workaround for IBM Bob, whose chat UI doesn't auto-extract PDF attachments. Multi-artifact brownfield: parse epic + reqs + ACs + child stories → push EWM work item + DNG module + ETM test cases + cross-links in one round. **Do NOT offer a 4-option fragmented menu** (import-OR-summarize-OR-tasks-OR-structure). `/import-work-item` covers all of those simultaneously — offer only TWO choices: full import (default) or read-only summary. | require a PDF path. Pasted text works just as well — never block the user when they've already given you the content. Don't guess work item types — call `get_ewm_workitem_types`. Don't try to match Jira assignees to EWM users — leave unset. **Don't fragment the flow** — see "Anti-pattern: don't fragment a unified flow" section below. |
 | "show me the requirements in [module]" / "list reqs" / "read [module]" | **Step 3a: READ Path** | dump every req without filter — interview about filtering first |
 | "update yourself" / "are you up to date" / "pull the latest" / "update the MCP" / "update this server" / "update the elm mcp" | call `update_elm_mcp` ONCE — that's the entire update. **DO NOT run individual `git fetch` / `git pull` / `pip install` / `restart` commands via Bash** — `update_elm_mcp` does all of that internally in a single tool call so the user is prompted at most once (and zero times if `update_elm_mcp` is in their `alwaysAllow`). | run a series of bash commands. The user explicitly said this is friction — eight per-step approvals when one tool call is enough. The tool handles fetch + pull + version comparison + restart-instructions internally. Just call it. |
+| "what's the team doing?" / "what did Sarah do yesterday?" / "who's stuck?" / "team status" | call `get_team_actions` (with optional `who` / `since` / `status` filters) | manually list each user's runs — `get_team_actions` reads the BOB Team Actions module which is auto-populated as the team works |
+| "wrap up" / "I'm done for today" / "good for now" / "pausing" / "/wrap-up" — user signals they're stopping their session | call `wrap_up_session` ONCE with their verbatim notes as `notes=`. This flushes a final entry to BOB Team Actions so teammates see what state the user paused in. | leave the session unwrapped — the auto-log entries are mid-window, not closing. The wrap-up entry tags the session as Completed/Hand-off/Stuck/Paused so anyone reading later knows whether to pick it up |
 | "what can you do?" / "list your tools" / "help" | call `list_capabilities` | enumerate tools from memory |
 
 **When in doubt, ask the user.** "I can interpret 'build me X' two ways: (a) the full agentic flow that creates requirements + tasks + tests in ELM first then writes code, or (b) just write code now without ELM artifacts. Which one?" Default toward (a) when ELM MCP is available — that's the value of having ELM in the loop.
@@ -34,6 +36,26 @@ Before doing anything, check what the user actually wants. The mapping below cat
   3. **They attached a PDF to chat but didn't paste or give a path** → ask them to do either (1) or (2). Default suggestion: *"Open the PDF, Cmd-A → Cmd-C → paste the text here. Bob doesn't auto-extract PDF attachments."*
 
 Don't claim you "can't read PDFs" without offering the workaround. The MCP can read PDFs fine; it just needs path or text, not a chat attachment.
+
+**🛑 ANTI-PATTERN: don't fragment a unified flow into a multiple-choice menu.**
+
+When the user shows you a **work-item-shaped PDF** (Jira epic, Azure DevOps work item, anything with reqs + ACs + sub-tasks bundled), do NOT respond with a generic menu like:
+
+> ❌ *"What would you like to do?  
+> &nbsp;&nbsp;1. Import into DNG  
+> &nbsp;&nbsp;2. Create a project structure  
+> &nbsp;&nbsp;3. Generate tasks/stories  
+> &nbsp;&nbsp;4. Analyze and summarize"*
+
+Those are NOT four separate paths. **They are ALL subsets of `/import-work-item`** — that prompt does (1) + (2) + (3) + a gap audit (most of 4) in a SINGLE chat round, with proper cross-links between domains. Splitting them would create artifacts in DNG / EWM / ETM that don't reference each other — exactly the opposite of why we built this.
+
+The correct default response to a work-item PDF is:
+
+> ✅ *"I see a work-item-shaped PDF. The unified path is `/import-work-item` — it parses the whole graph and creates everything (EWM epic + DNG reqs module + ETM test cases + child stories + cross-links) in one go, with a gap audit before pushing. Want me to proceed? Or do you want a read-only summary instead (no writes to ELM)?"*
+
+Two real choices, not four fragmented ones. The user always gets a preview before push, and three escape hatches (address-each / push-with-defaults / ignore).
+
+**Read-only summary** is the only legit alternative — invoke `/review-requirements` AFTER importing into DNG, OR just answer in chat without calling any write tools. Don't offer "summarize without import" as a peer to "import" — they're different tasks at different lifecycle stages.
 
 **Never** skip straight to code generation when the user mentions building anything that could be tracked in ELM. The whole point of this MCP is to keep ELM as the system of record.
 

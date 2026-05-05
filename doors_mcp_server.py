@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -505,6 +505,275 @@ def _render_run_as_markdown(run: Dict) -> str:
 _loaded_run_count = _load_runs_from_disk()
 if _loaded_run_count > 0:
     sys.stderr.write(f"[elm-mcp] loaded {_loaded_run_count} run(s) from disk\n")
+
+
+# ── BOB Team Actions — auto session logging ─────────────────────
+# Per-process session tracker. Each session represents one user × one
+# DNG project, started when the user first does material work in that
+# session. Auto-log entries get appended (throttled) to a per-user
+# artifact in the BOB Team Actions module. Anyone else's Bob can read
+# the module to see what the team is doing across the project.
+
+_TEAM_ACTIONS_ENABLED = os.environ.get("ELM_MCP_TEAM_ACTIONS", "1") != "0"
+_TEAM_ACTIONS_MODULE_NAME = os.environ.get(
+    "ELM_MCP_TEAM_ACTIONS_MODULE", "BOB Team Actions"
+)
+try:
+    _TEAM_ACTIONS_INTERVAL_SEC = int(
+        os.environ.get("ELM_MCP_TEAM_ACTIONS_INTERVAL_MIN", "10")
+    ) * 60
+except ValueError:
+    _TEAM_ACTIONS_INTERVAL_SEC = 600
+
+# session_key (user@project_url) -> session dict
+_TEAM_SESSIONS: Dict[str, Dict] = {}
+
+
+def _team_session_key(user: str, project_url: str) -> str:
+    return f"{user}@@{project_url}"
+
+
+def _get_or_start_team_session(user: str, project_url: str) -> Dict:
+    """Return the live session for (user, project), creating one if
+    none exists yet."""
+    import datetime as _dt
+    import uuid as _uuid
+    key = _team_session_key(user, project_url)
+    sess = _TEAM_SESSIONS.get(key)
+    if sess is not None:
+        return sess
+    now = _dt.datetime.utcnow().isoformat() + "Z"
+    sess = {
+        "session_id": _uuid.uuid4().hex[:10],
+        "user": user,
+        "project_url": project_url,
+        "started_at": now,
+        "last_log_at": "",  # never flushed yet
+        "last_activity_at": now,
+        "status": "in_progress",
+        "activity_buffer": [],
+        "module_url": "",
+        "artifact_url": "",
+        "summary_so_far": [],  # list of past flush summaries (most recent last)
+    }
+    _TEAM_SESSIONS[key] = sess
+    return sess
+
+
+def _record_team_activity(kind: str, summary: str,
+                           user: str = "", project_url: str = "") -> None:
+    """Buffer an activity entry. Called from write-tool handlers. Cheap —
+    just appends to memory. The actual DNG write happens later via
+    _maybe_flush_team_log on the throttle interval."""
+    if not _TEAM_ACTIONS_ENABLED:
+        return
+    if not user or not project_url:
+        return  # need both to identify a session
+    import datetime as _dt
+    sess = _get_or_start_team_session(user, project_url)
+    sess["last_activity_at"] = _dt.datetime.utcnow().isoformat() + "Z"
+    sess["activity_buffer"].append({
+        "ts": sess["last_activity_at"],
+        "kind": kind,
+        "summary": summary,
+    })
+
+
+def _team_session_for_current_user(project_url: str = "") -> Optional[Dict]:
+    """Look up the active team-actions session for the currently-
+    authenticated user against the given project (or any project if
+    not given). Returns None if no auth or no session yet."""
+    if not _TEAM_ACTIONS_ENABLED:
+        return None
+    if _client is None:
+        return None
+    user = getattr(_client, "username", "") or ""
+    if not user:
+        return None
+    if project_url:
+        return _TEAM_SESSIONS.get(_team_session_key(user, project_url))
+    # Return the most recent session for this user across any project
+    matches = [s for s in _TEAM_SESSIONS.values() if s["user"] == user]
+    if not matches:
+        return None
+    return max(matches, key=lambda s: s.get("last_activity_at", ""))
+
+
+def _maybe_flush_team_log(force: bool = False) -> None:
+    """If any active session is past its throttle interval, flush its
+    buffer to DNG. Cheap when not flushing (just timestamp checks)."""
+    if not _TEAM_ACTIONS_ENABLED:
+        return
+    if _client is None:
+        return
+    import datetime as _dt
+    now = _dt.datetime.utcnow()
+    for sess in list(_TEAM_SESSIONS.values()):
+        if sess["status"] != "in_progress":
+            continue
+        if not sess["activity_buffer"] and not force:
+            continue
+        # Throttle check
+        if not force and sess["last_log_at"]:
+            try:
+                last = _dt.datetime.fromisoformat(
+                    sess["last_log_at"].rstrip("Z"))
+                if (now - last).total_seconds() < _TEAM_ACTIONS_INTERVAL_SEC:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        try:
+            _flush_session_to_dng(sess)
+        except Exception as e:
+            sys.stderr.write(
+                f"[elm-mcp] team-actions flush failed for session "
+                f"{sess['session_id']}: {e}\n"
+            )
+
+
+def _ensure_team_actions_module(sess: Dict) -> str:
+    """Find the BOB Team Actions module in the session's project, or
+    create it. Caches the URL on the session. Returns the module URL or
+    empty string on failure."""
+    if sess.get("module_url"):
+        return sess["module_url"]
+    if _client is None:
+        return ""
+    project_url = sess["project_url"]
+    try:
+        modules = _client.get_modules(project_url) or []
+        target = next(
+            (m for m in modules
+             if m.get("title", "").strip().lower()
+             == _TEAM_ACTIONS_MODULE_NAME.lower()),
+            None,
+        )
+        if target:
+            sess["module_url"] = target.get("url", "")
+            return sess["module_url"]
+        new_mod = _client.create_module(
+            project_url,
+            _TEAM_ACTIONS_MODULE_NAME,
+            "Auto-created by elm-mcp. Per-user session entries — "
+            "anyone on the team can read this module to see what "
+            "everyone is doing across the project.",
+        )
+        if new_mod and "error" not in new_mod:
+            sess["module_url"] = new_mod.get("url", "")
+            return sess["module_url"]
+    except Exception:
+        pass
+    return ""
+
+
+def _summarize_buffer(buffer: List[Dict]) -> str:
+    """Human-readable summary of buffered activity entries."""
+    if not buffer:
+        return "(no activity in this window)"
+    counts: Dict[str, int] = {}
+    notes: List[str] = []
+    for e in buffer:
+        kind = e.get("kind", "other")
+        counts[kind] = counts.get(kind, 0) + 1
+        s = e.get("summary", "").strip()
+        if s and len(notes) < 5:
+            notes.append(s)
+    parts = []
+    for kind, n in counts.items():
+        parts.append(f"{n}× {kind}")
+    summary = " · ".join(parts)
+    if notes:
+        summary += "\n  - " + "\n  - ".join(notes)
+    return summary
+
+
+def _render_session_artifact_body(sess: Dict) -> str:
+    """Render the session as the body of its team-actions artifact."""
+    lines = [
+        f"# {sess['user']} — session {sess['session_id']}",
+        "",
+        f"**Status:** {sess.get('status', 'in_progress')}",
+        f"**Project:** {sess['project_url']}",
+        f"**Started:** {sess['started_at']}",
+        f"**Last activity:** {sess['last_activity_at']}",
+        "",
+        "## Recent activity",
+    ]
+    summaries = sess.get("summary_so_far", []) or []
+    for s in summaries[-20:]:  # last 20 flush windows
+        lines.append(f"- **{s.get('flushed_at', '?')[:19]}Z** — {s.get('summary', '')}")
+        for note in s.get("notes", [])[:3]:
+            lines.append(f"  - {note}")
+    if sess.get("activity_buffer"):
+        lines.append("")
+        lines.append("## Activity since last flush (not yet rolled into history)")
+        for e in sess["activity_buffer"][-10:]:
+            lines.append(f"- {e.get('summary', '?')}")
+    return "\n".join(lines)
+
+
+def _flush_session_to_dng(sess: Dict) -> None:
+    """Write or update the per-session artifact in BOB Team Actions module.
+    Does not raise — caller wraps in try/except."""
+    if _client is None:
+        return
+    import datetime as _dt
+    module_url = _ensure_team_actions_module(sess)
+    if not module_url:
+        return  # couldn't find or create module; skip silently
+
+    # Roll buffer into summary_so_far
+    buf = sess.get("activity_buffer", [])
+    if buf:
+        notes = [e.get("summary", "") for e in buf if e.get("summary")]
+        sess["summary_so_far"].append({
+            "flushed_at": _dt.datetime.utcnow().isoformat() + "Z",
+            "summary": _summarize_buffer(buf).split("\n")[0],
+            "notes": notes,
+        })
+        sess["activity_buffer"] = []
+
+    body = _render_session_artifact_body(sess)
+    title = f"[BOB-TEAM] {sess['user']} — session {sess['session_id']}"
+
+    if sess.get("artifact_url"):
+        # Update existing artifact in place
+        try:
+            _client.update_requirement(
+                sess["artifact_url"],
+                title=title,
+                content=body,
+            )
+        except Exception:
+            pass
+    else:
+        # Create new — find a shape (System Requirement or first available)
+        try:
+            shapes = _client.get_artifact_shapes(sess["project_url"]) or []
+            shape = next(
+                (s for s in shapes
+                 if "system requirement" in s.get("name", "").lower()),
+                shapes[0] if shapes else None,
+            )
+            if not shape:
+                return
+            new_art = _client.create_requirement(
+                project_url=sess["project_url"],
+                title=title,
+                content=body,
+                shape_url=shape.get("url", ""),
+            )
+            if new_art and "error" not in new_art:
+                sess["artifact_url"] = new_art.get("url", "")
+                # Best-effort: bind to the BOB Team Actions module
+                try:
+                    _client.add_to_module(module_url, [sess["artifact_url"]])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    sess["last_log_at"] = _dt.datetime.utcnow().isoformat() + "Z"
 
 
 def _get_or_create_client() -> Optional[DOORSNextClient]:
@@ -1925,6 +2194,67 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="wrap_up_session",
+            description=(
+                "End the current BOB Team Actions session and flush a "
+                "final entry to the BOB Team Actions module. Call this "
+                "when the user signals they're done for now: *'wrap up'*, "
+                "*'I'm done'*, *'good for today'*, *'pausing for "
+                "review'*, etc. The final entry captures: any unflushed "
+                "activity since the last auto-log, plus the user's "
+                "verbatim wrap-up notes if they gave any. After wrap-up, "
+                "the session is marked completed/handed-off — subsequent "
+                "activity in the same process starts a fresh session."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "string",
+                        "description": "Free-text notes from the user about where they're stopping, what's pending, who's picking up. Optional. Surfaced verbatim in the final entry."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Final status of the session: 'Completed', 'Hand-off', 'Stuck', 'Blocked', 'Paused'. Default 'Completed'."
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_team_actions",
+            description=(
+                "Read recent entries from the BOB Team Actions module — "
+                "what everyone on the team has been doing across the "
+                "project. Use this when the user asks 'what's the team "
+                "doing?', 'what did Sarah work on yesterday?', 'who's "
+                "stuck?'. Filters by recency (default last 7d), by user, "
+                "by status. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "DNG project name or number. Optional — if omitted, uses the connected project."
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Time window: '24h', '7d', '30d'. Default '7d'."
+                    },
+                    "who": {
+                        "type": "string",
+                        "description": "Filter to a specific user. Optional."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: 'In Progress', 'Completed', 'Stuck', etc. Optional."
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="publish_build_state_to_dng",
             description=(_WRITE_GATE +
                 "Write (or update) a build run's current state as a DNG "
@@ -3107,8 +3437,135 @@ async def list_tools() -> list[Tool]:
 
 # ── Tool Handlers ─────────────────────────────────────────────
 
+# Tools whose runs are MILESTONE-WORTHY for team-actions auto-log.
+# Pure reads (list_*, get_*, list_capabilities, elm_mcp_health, etc.) are
+# skipped — they're navigation noise, not state changes. Search/query
+# tools that take a real filter ARE captured because they signal
+# intentional research, not casual browsing.
+_TEAM_LOG_TOOLS_WRITE = {
+    "create_module", "create_requirements", "update_requirement",
+    "update_requirement_attributes", "create_baseline", "add_to_module",
+    "create_folder", "create_task", "create_defect", "update_work_item",
+    "transition_work_item", "create_test_case", "create_test_script",
+    "create_test_result", "create_link", "link_workitem_to_external_url",
+    "publish_build_state_to_dng", "save_requirements", "generate_chart",
+}
+_TEAM_LOG_TOOLS_PHASE = {"build_project", "build_new_project",
+                         "build_from_existing", "build_project_next"}
+_TEAM_LOG_TOOLS_RESEARCH = {"search_requirements", "query_work_items"}
+_TEAM_LOG_TOOLS_SESSION = {"connect_to_elm", "wrap_up_session"}
+
+_TEAM_LOG_TOOLS_ALL = (
+    _TEAM_LOG_TOOLS_WRITE | _TEAM_LOG_TOOLS_PHASE
+    | _TEAM_LOG_TOOLS_RESEARCH | _TEAM_LOG_TOOLS_SESSION
+)
+
+
+def _summarize_tool_call(name: str, arguments: Any,
+                         result_text: str) -> str:
+    """Produce a one-line summary of a tool invocation suitable for the
+    team-actions activity log. Look for known-error markers in the
+    response text so we can flag stuck-state."""
+    err_marker = ("error" in result_text.lower()[:200]
+                  or "🚦 GATE LOCKED" in result_text
+                  or "403" in result_text or "404" in result_text)
+    args = arguments or {}
+    # Pick a reasonable per-tool label
+    if name == "connect_to_elm":
+        label = f"connected to {args.get('url', '')}"
+    elif name in ("build_new_project", "build_from_existing", "build_project"):
+        label = f"started build flow ({name}): \"{args.get('project_idea', '')[:60]}\""
+    elif name == "build_project_next":
+        label = f"phase advance: phase {args.get('current_phase', '?')} → {int(args.get('current_phase', 0)) + 1 if isinstance(args.get('current_phase'), int) else '?'}"
+    elif name == "create_module":
+        label = f"created module \"{args.get('title', '?')}\""
+    elif name == "create_requirements":
+        reqs = args.get("requirements") or []
+        label = f"created {len(reqs)} requirements"
+        m = args.get("module_name") or ""
+        if m:
+            label += f" in module \"{m}\""
+    elif name == "create_task":
+        label = f"created task \"{args.get('title', '?')}\""
+    elif name == "create_defect":
+        label = f"created defect \"{args.get('title', '?')}\""
+    elif name == "create_test_case":
+        label = f"created test case \"{args.get('title', '?')}\""
+    elif name == "create_test_result":
+        label = f"recorded test result: {args.get('status', '?')}"
+    elif name == "transition_work_item":
+        label = f"transitioned work item to \"{args.get('target_state', '?')}\""
+    elif name == "update_requirement":
+        label = "updated requirement"
+    elif name == "create_link":
+        label = "created cross-tool link"
+    elif name == "link_workitem_to_external_url":
+        label = f"linked work item to {args.get('external_url', '')}"
+    elif name == "publish_build_state_to_dng":
+        label = "published build state to DNG"
+    elif name == "wrap_up_session":
+        label = "wrapped up session"
+    elif name in _TEAM_LOG_TOOLS_RESEARCH:
+        where = args.get("where") or args.get("query") or ""
+        label = f"searched ({name}): {where[:80]}"
+    else:
+        label = f"called {name}"
+    if err_marker:
+        label = "❌ " + label + " — error"
+    return label
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
+    """Outer wrapper: dispatches to the real handler logic (now in
+    `_dispatch_tool`), then auto-logs the call into BOB Team Actions
+    if it's a milestone-worthy event AND the user has team-actions
+    enabled."""
+    result = await _dispatch_tool(name, arguments)
+
+    # Auto-log into BOB Team Actions (best-effort, never raises)
+    try:
+        if (_TEAM_ACTIONS_ENABLED and _client is not None
+                and name in _TEAM_LOG_TOOLS_ALL):
+            user = getattr(_client, "username", "") or ""
+            # Resolve the project URL we should attach this activity to.
+            # Use the active build run's DNG URL if there is one;
+            # otherwise the most recent connected project.
+            project_url = ""
+            for r in _RUNS.values():
+                if r.get("current_phase", 0) < 9:
+                    project_url = (r.get("project_urls") or {}).get("dng", "")
+                    if project_url:
+                        break
+            if not project_url:
+                # Fallback: use the first DNG project as the project_url
+                # for team-action logging (not perfect; project-specific
+                # logging would need explicit context from the user).
+                if _projects_cache:
+                    project_url = _projects_cache[0].get("services_url", "") \
+                        or _projects_cache[0].get("url", "")
+            if user and project_url:
+                # Combine result-text from all return TextContents for
+                # error detection
+                result_text = ""
+                for tc in result:
+                    if hasattr(tc, "text"):
+                        result_text += tc.text + "\n"
+                summary = _summarize_tool_call(name, arguments, result_text)
+                _record_team_activity(
+                    kind=name,
+                    summary=summary,
+                    user=user,
+                    project_url=project_url,
+                )
+                _maybe_flush_team_log()
+    except Exception as e:
+        sys.stderr.write(f"[elm-mcp] team-actions hook failed: {e}\n")
+
+    return result
+
+
+async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
     global _client, _projects_cache, _ewm_projects_cache, _etm_projects_cache
     global _modules_cache, _last_requirements, _last_module_name, _last_project_name
     global _folder_cache
@@ -3835,6 +4292,171 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 ))]
             err = new_art.get('error', 'unknown') if new_art else 'unknown'
             return [TextContent(type="text", text=f"Error: {err}")]
+
+        # ── wrap_up_session ───────────────────────────────────────
+        if name == "wrap_up_session":
+            notes = (arguments.get("notes") or "").strip()
+            status = (arguments.get("status") or "Completed").strip()
+            sess = _team_session_for_current_user()
+            if not sess:
+                return [TextContent(type="text", text=(
+                    "No active BOB Team Actions session found for the "
+                    "current user. Either nothing material was done yet "
+                    "(no auto-log fired) or team-actions is disabled "
+                    "(`ELM_MCP_TEAM_ACTIONS=0`). Nothing to wrap up."
+                ))]
+            # Append the wrap-up note as a final activity entry
+            if notes:
+                _record_team_activity(
+                    kind="wrap_up_session",
+                    summary=f"wrap-up: \"{notes[:200]}\"",
+                    user=sess["user"],
+                    project_url=sess["project_url"],
+                )
+            sess["status"] = status
+            try:
+                _flush_session_to_dng(sess)
+            except Exception as e:
+                return [TextContent(type="text", text=(
+                    f"Wrap-up flush failed: {e}. Session marked "
+                    f"'{status}' in memory but the final DNG entry "
+                    f"didn't get written."
+                ))]
+            artifact_url = sess.get("artifact_url", "")
+            return [TextContent(type="text", text=(
+                f"# Session wrapped up\n\n"
+                f"**User:** {sess['user']}\n"
+                f"**Status:** {status}\n"
+                f"**Session ID:** {sess['session_id']}\n"
+                f"**Final entry:** [{artifact_url or 'DNG'}]({artifact_url})\n\n"
+                f"Future tool calls in this process start a fresh team-"
+                f"actions session. Anyone on the team can read the BOB "
+                f"Team Actions module to see this session's record."
+            ))]
+
+        # ── get_team_actions ──────────────────────────────────────
+        if name == "get_team_actions":
+            since = (arguments.get("since") or "7d").strip().lower()
+            who_filter = (arguments.get("who") or "").strip().lower()
+            status_filter = (arguments.get("status") or "").strip().lower()
+            project_arg = (arguments.get("project") or "").strip()
+
+            # Resolve project
+            project_url = ""
+            if project_arg:
+                if not _projects_cache:
+                    _projects_cache = client.list_projects()
+                proj = _find_by_identifier(_projects_cache, project_arg)
+                if proj:
+                    project_url = proj.get("services_url", "") or proj.get("url", "")
+            if not project_url:
+                # Use the active session's project, or the most recent
+                # team-actions session
+                sess = _team_session_for_current_user()
+                if sess:
+                    project_url = sess["project_url"]
+            if not project_url and _projects_cache:
+                project_url = _projects_cache[0].get("services_url", "") or _projects_cache[0].get("url", "")
+            if not project_url:
+                return [TextContent(type="text", text=(
+                    "Error: couldn't resolve a DNG project. Pass "
+                    "`project` or call `connect_to_elm` + `list_projects` "
+                    "first."
+                ))]
+
+            # Find the BOB Team Actions module
+            try:
+                modules = client.get_modules(project_url) or []
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: failed to list modules — {e}")]
+            target_mod = next(
+                (m for m in modules
+                 if m.get("title", "").strip().lower()
+                 == _TEAM_ACTIONS_MODULE_NAME.lower()),
+                None,
+            )
+            if not target_mod:
+                return [TextContent(type="text", text=(
+                    f"No '{_TEAM_ACTIONS_MODULE_NAME}' module found in "
+                    f"this project yet. The module is auto-created the "
+                    f"first time anyone on the team does material work "
+                    f"(creates a requirement, transitions a task, "
+                    f"advances a build phase). If everyone has just been "
+                    f"reading, the module won't exist yet — that's "
+                    f"expected."
+                ))]
+
+            # Read entries
+            try:
+                entries = client.get_module_requirements(target_mod.get("url", "")) or []
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: failed to read module — {e}")]
+
+            # Filter to [BOB-TEAM] artifacts; apply who / status / since filters
+            import datetime as _dt
+            now = _dt.datetime.utcnow()
+            since_delta_h = 7 * 24
+            if since.endswith("h"):
+                try: since_delta_h = int(since[:-1])
+                except ValueError: pass
+            elif since.endswith("d"):
+                try: since_delta_h = int(since[:-1]) * 24
+                except ValueError: pass
+            cutoff = now - _dt.timedelta(hours=since_delta_h)
+
+            filtered = []
+            for e in entries:
+                title = e.get("title", "") or ""
+                if "[BOB-TEAM]" not in title:
+                    continue
+                if who_filter and who_filter not in title.lower():
+                    continue
+                # Status filter — pull from body if there
+                body = e.get("content", "") or e.get("primary_text", "") or ""
+                if status_filter and status_filter not in body.lower():
+                    continue
+                # Modified-time filter (best-effort — not all reads return it)
+                mod_str = e.get("modified", "") or ""
+                if mod_str:
+                    try:
+                        mod_dt = _dt.datetime.fromisoformat(mod_str.replace("Z", ""))
+                        if mod_dt < cutoff:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                filtered.append({
+                    "title": title.replace("[BOB-TEAM]", "").strip(),
+                    "url": e.get("url", ""),
+                    "modified": mod_str,
+                    "body_excerpt": body[:300] + ("…" if len(body) > 300 else ""),
+                })
+
+            if not filtered:
+                return [TextContent(type="text", text=(
+                    f"No team actions in the last {since}"
+                    + (f" by {who_filter}" if who_filter else "")
+                    + (f" with status {status_filter}" if status_filter else "")
+                    + ". The BOB Team Actions module exists but no "
+                    f"entries match. (Total entries in module: {len(entries)}.)"
+                ))]
+
+            lines = [
+                f"# Team Actions — last {since}",
+                f"_Module: [{target_mod.get('title')}]({target_mod.get('url')})_",
+                "",
+                f"**{len(filtered)} entries**",
+                "",
+            ]
+            for f in sorted(filtered, key=lambda x: x.get("modified", ""), reverse=True):
+                lines.append(f"### [{f['title']}]({f['url']})")
+                if f.get("modified"):
+                    lines.append(f"_Modified: {f['modified'][:19]}_")
+                lines.append("")
+                excerpt = f.get("body_excerpt", "").strip()
+                if excerpt:
+                    lines.append(excerpt)
+                lines.append("")
+            return [TextContent(type="text", text="\n".join(lines))]
 
         # ── generate_traceability_matrix ──────────────────────────
         if name == "generate_traceability_matrix":
@@ -6016,7 +6638,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (53 tools, 9 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (55 tools, 9 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

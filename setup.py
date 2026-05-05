@@ -393,6 +393,8 @@ _BOB_ALWAYS_ALLOW = [
     "build_from_existing",
     "build_project_status",
     "build_project_resume",
+    "wrap_up_session",
+    "get_team_actions",
 ]
 # Note: generate_chart and save_requirements are intentionally NOT in this
 # list. Both write to local disk (PNG / JSON), so they should prompt the
