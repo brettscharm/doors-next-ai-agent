@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -3764,20 +3764,46 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             # empty, just whitespace, or a clear non-approval ("no", "stop",
             # "wait", "not yet", "let me think").
             #
-            # Word lists are CONSERVATIVE — bare verbs like "do", "go", "build",
-            # "push", "pull", "continue" were removed because they trip on
-            # questions ("do I need to approve each one?", "go where?", "can
-            # you push when I say so?"). Multi-word phrases ("go ahead", "push
-            # it", "build it") still match via substring on signal_lower.
+            # Word lists balance two failure modes:
+            #   (a) too STRICT → user types natural approvals ("continue",
+            #       "correct, go") and the gate rejects them. Was the v0.1.13
+            #       overcorrection — fixed in v0.5.3 by re-adding common
+            #       affirmatives.
+            #   (b) too LOOSE → user asks a question containing approval-
+            #       shaped tokens and the gate auto-advances ("can I
+            #       continue showing me the table?"). Handled by the
+            #       rejection-phrase check below — phrases like "don't
+            #       continue" and "wait" win over any approval token.
+            # Result: bare common affirmatives are allowed as approval; any
+            # rejection phrase or question-shape (handled separately) wins.
             approval_words = {
-                "yes", "yeah", "yep", "yup", "approved", "approve", "approves",
-                "ok", "okay", "lgtm", "ship", "ships",
-                "looks", "perfect", "alright", "confirmed", "confirm",
+                # Direct affirmatives
+                "yes", "yeah", "yep", "yup", "ya", "yah",
+                "ok", "okay", "k", "lgtm",
+                "approved", "approve", "approves",
+                # Action verbs that read as approval in build-flow context
+                "continue", "proceed", "ship", "ships",
+                "go",  # Single "go" — still requires non-rejection context
+                # Confirmations of a summary
+                "correct", "right", "exactly", "yep", "yes",
+                "confirmed", "confirm",
+                # Vibes
+                "looks", "perfect", "great", "awesome", "alright",
+                "absolutely", "definitely", "sure", "totally",
             }
             approval_phrases = {
+                # Multi-word affirmatives
                 "go ahead", "push it", "push them", "ship it", "build it",
-                "looks good", "let's go", "lets go", "proceed", "continue with",
+                "looks good", "looks great", "let's go", "lets go",
                 "do it", "make it so", "go for it",
+                # Natural conversational approvals
+                "sounds good", "sounds great", "yes please",
+                "all good", "good to go", "good with it",
+                "i agree", "agreed", "approved that",
+                "go for it", "ship them",
+                # Confirming a summary
+                "that's right", "thats right", "that's correct",
+                "thats correct", "correct - continue", "correct continue",
             }
             rejection_words = {
                 "no", "stop", "wait", "hold", "cancel", "abort", "reject",
@@ -3788,9 +3814,26 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                 "hold on", "hold up", "let me think",
                 "wait for", "wait until", "stop right",
                 "i don't", "i dont", "i'm not", "im not",
+                # Question-shape guards — if the user is asking rather
+                # than approving, treat as non-approval. The strict
+                # markers below catch obvious questions; ambiguous
+                # cases ("right?") still pass through approval check
+                # and are caught by sentence shape downstream.
+                "what is", "what's", "whats",
+                "show me", "tell me", "explain",
+                "can i", "should i", "do i", "do i need",
+                "before we", "before you",
+                "why is", "why are", "why do",
             }
             signal_lower = user_signal.lower()
             signal_tokens = set(t.strip(".,!?;:") for t in signal_lower.split())
+
+            # Bare question-mark guard: if the message looks like a
+            # question (ends in '?' OR the only "approval" word is
+            # at the start of a clause that's clearly interrogative),
+            # treat it as not-approval. Belt-and-braces with the
+            # rejection phrases above.
+            ends_in_question = signal_lower.rstrip().endswith("?")
 
             if not user_signal:
                 return [TextContent(type="text", text=(
@@ -3806,14 +3849,20 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             # Detect rejection (token OR multi-word phrase). Critically, a
             # rejection PHRASE like "do not push" beats any approval word in
             # the same string — phrase-match wins because it's more specific.
+            # Question-shaped messages also count as non-approval — user
+            # is asking, not approving.
             rejection_phrase_hit = any(rp in signal_lower for rp in rejection_phrases)
             rejection_token_hit = bool(signal_tokens & rejection_words)
             approval_phrase_hit = any(ap in signal_lower for ap in approval_phrases)
             approval_token_hit = bool(signal_tokens & approval_words)
 
             # Rejection wins if there's a rejection phrase, OR a rejection
-            # token without any approval signal at all.
-            if rejection_phrase_hit or (rejection_token_hit and not (approval_phrase_hit or approval_token_hit)):
+            # token without any approval signal at all, OR the message is
+            # purely a question (ends in '?' with no approval phrase).
+            is_pure_question = ends_in_question and not approval_phrase_hit
+            if (rejection_phrase_hit
+                    or (rejection_token_hit and not (approval_phrase_hit or approval_token_hit))
+                    or is_pure_question):
                 return [TextContent(type="text", text=(
                     f"🚦 GATE LOCKED — user said something that looks like a "
                     f"REJECTION, not an approval.\n\n"
