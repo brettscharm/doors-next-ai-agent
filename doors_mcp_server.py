@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -3155,6 +3155,142 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["ewm_project"]
+            }
+        ),
+        Tool(
+            name="resolve_requirement_id",
+            description=(
+                "Look up a DNG requirement by its short ID (e.g. '123' or "
+                "'REQ-123' or 'NFR-7') and return the full URL plus title. "
+                "Use this when the user references a requirement by its "
+                "human-readable ID and you need the URL for a subsequent "
+                "tool call. Strips optional letter prefixes (REQ-, NFR-, "
+                "etc.) and tries the numeric portion. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_identifier": {
+                        "type": "string",
+                        "description": "DNG project number or name"
+                    },
+                    "requirement_id": {
+                        "type": "string",
+                        "description": "Short ID — '123', 'REQ-123', 'NFR-7', etc."
+                    }
+                },
+                "required": ["project_identifier", "requirement_id"]
+            }
+        ),
+        Tool(
+            name="resolve_user",
+            description=(
+                "Resolve a user identifier (URI, username, or display "
+                "name) to a structured record. Bidirectional: pass "
+                "either form. Useful when a tool returns a contributor "
+                "URI like '.../users/abc123' and you want to surface a "
+                "human name, OR when the user mentions a name and you "
+                "need the URI for assigning ownership. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "User URI (https://.../users/...) OR display name OR username"
+                    }
+                },
+                "required": ["identifier"]
+            }
+        ),
+        Tool(
+            name="list_test_cases",
+            description=(
+                "List test cases in an ETM project. Optional `where` is "
+                "an OSLC where clause (e.g. dcterms:title=\"Login flow\", "
+                "or oslc:status=\"passed\"). Use this to inventory the "
+                "test suite, find existing tests for a feature, etc. "
+                "Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {"type": "string", "description": "ETM project name or number"},
+                    "where": {"type": "string", "description": "Optional OSLC where clause"},
+                    "max_results": {"type": "integer", "description": "Max items (default 50)"}
+                },
+                "required": ["etm_project"]
+            }
+        ),
+        Tool(
+            name="list_test_plans",
+            description=(
+                "List test plans in an ETM project. Test plans hold "
+                "test strategy / scope, typically referencing many test "
+                "cases. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {"type": "string", "description": "ETM project name or number"},
+                    "where": {"type": "string", "description": "Optional OSLC where clause"},
+                    "max_results": {"type": "integer", "description": "Max items (default 50)"}
+                },
+                "required": ["etm_project"]
+            }
+        ),
+        Tool(
+            name="list_test_execution_records",
+            description=(
+                "List test execution records (TERs) in an ETM project. "
+                "A TER is an instance of running a test case in a "
+                "particular release/iteration; test results attach to "
+                "TERs. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {"type": "string", "description": "ETM project name or number"},
+                    "where": {"type": "string", "description": "Optional OSLC where clause"},
+                    "max_results": {"type": "integer", "description": "Max items (default 50)"}
+                },
+                "required": ["etm_project"]
+            }
+        ),
+        Tool(
+            name="create_test_plan",
+            description=(_WRITE_GATE +
+                "Create a Test Plan in ETM. Use for organizing test "
+                "execution at the release / sprint / feature level. "
+                "Test plans typically reference many test cases."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {"type": "string", "description": "ETM project name or number"},
+                    "title": {"type": "string", "description": "Test plan title"},
+                    "description": {"type": "string", "description": "Strategy / scope text"}
+                },
+                "required": ["etm_project", "title"]
+            }
+        ),
+        Tool(
+            name="create_test_execution_record",
+            description=(_WRITE_GATE +
+                "Create a Test Execution Record (TER) in ETM. A TER is "
+                "a runnable instance of a test case for a specific "
+                "release/iteration. Test results then attach to the TER. "
+                "Pair with create_test_result to actually record pass/fail."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "etm_project": {"type": "string", "description": "ETM project name or number"},
+                    "title": {"type": "string", "description": "TER title"},
+                    "test_case_url": {"type": "string", "description": "Full URL of the test case this TER runs"},
+                    "description": {"type": "string", "description": "Optional description"}
+                },
+                "required": ["etm_project", "title", "test_case_url"]
             }
         ),
         Tool(
@@ -6278,6 +6414,157 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(lines))]
 
         # ── get_ewm_workitem_types ─────────────────────────────
+        elif name == "resolve_requirement_id":
+            proj_arg = arguments.get("project_identifier", "")
+            req_id = arguments.get("requirement_id", "")
+            if not proj_arg or not req_id:
+                return [TextContent(type="text", text="Error: project_identifier and requirement_id are required.")]
+            if not _projects_cache:
+                _projects_cache = client.list_projects()
+            project = _find_by_identifier(_projects_cache, proj_arg)
+            if not project:
+                return [TextContent(type="text", text=f"Project not found: '{proj_arg}'")]
+            project_url = project.get('services_url') or project.get('url', '')
+            result = client.resolve_requirement_id(project_url, req_id)
+            if result:
+                return [TextContent(type="text", text=(
+                    f"# Requirement {result.get('id', req_id)}\n\n"
+                    f"**Title:** {result.get('title', '?')}\n"
+                    f"**URL:** [{result.get('url', '')}]({result.get('url', '')})\n"
+                    f"**Project:** {project.get('title', '?')}\n\n"
+                    f"Use this URL in any subsequent tool that needs a "
+                    f"`requirement_url` argument."
+                ))]
+            return [TextContent(type="text", text=(
+                f"No requirement with id '{req_id}' found in project "
+                f"'{project.get('title', proj_arg)}'. Try without the "
+                f"prefix, or check spelling."
+            ))]
+
+        elif name == "resolve_user":
+            ident = arguments.get("identifier", "").strip()
+            if not ident:
+                return [TextContent(type="text", text="Error: identifier is required.")]
+            result = client.resolve_user(ident)
+            if result:
+                return [TextContent(type="text", text=(
+                    f"# User\n\n"
+                    f"- **Name:** {result.get('name', '?')}\n"
+                    f"- **Username:** {result.get('username', '?')}\n"
+                    f"- **URI:** {result.get('uri', '')}\n"
+                    f"- **Email:** {result.get('email', '_(not exposed)_')}\n"
+                ))]
+            return [TextContent(type="text", text=(
+                f"No user matching '{ident}' found. Tried both display "
+                f"name and username queries against the JTS user "
+                f"catalog. The user may not exist in this Jazz install."
+            ))]
+
+        elif name == "list_test_cases":
+            etm_proj = arguments.get("etm_project", "").strip()
+            where = arguments.get("where", "").strip() or None
+            max_results = int(arguments.get("max_results", 50) or 50)
+            etm_projects = client.list_etm_projects()
+            etm_match = _find_by_identifier(etm_projects, etm_proj)
+            if not etm_match:
+                return [TextContent(type="text",
+                    text=f"ETM project not found: {etm_proj}.")]
+            tcs = client.list_test_cases(etm_match['url'], where, max_results)
+            if not tcs:
+                return [TextContent(type="text", text=(
+                    f"No test cases in ETM project '{etm_match['title']}'"
+                    + (f" matching `{where}`" if where else "") + "."
+                ))]
+            lines = [f"# Test Cases in {etm_match['title']}", "",
+                     f"**{len(tcs)} test case(s)**" + (f" (filter: `{where}`)" if where else ""), ""]
+            for tc in tcs:
+                lines.append(f"- **{tc.get('identifier', '?')}** — [{tc.get('title', '?')}]({tc.get('url', '')})")
+                if tc.get('state'):
+                    lines.append(f"  - state: {tc['state']}")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "list_test_plans":
+            etm_proj = arguments.get("etm_project", "").strip()
+            where = arguments.get("where", "").strip() or None
+            max_results = int(arguments.get("max_results", 50) or 50)
+            etm_projects = client.list_etm_projects()
+            etm_match = _find_by_identifier(etm_projects, etm_proj)
+            if not etm_match:
+                return [TextContent(type="text",
+                    text=f"ETM project not found: {etm_proj}.")]
+            plans = client.list_test_plans(etm_match['url'], where, max_results)
+            if not plans:
+                return [TextContent(type="text", text=(
+                    f"No test plans in ETM project '{etm_match['title']}'."
+                ))]
+            lines = [f"# Test Plans in {etm_match['title']}", "",
+                     f"**{len(plans)} test plan(s)**", ""]
+            for p in plans:
+                lines.append(f"- **{p.get('identifier', '?')}** — [{p.get('title', '?')}]({p.get('url', '')})")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "list_test_execution_records":
+            etm_proj = arguments.get("etm_project", "").strip()
+            where = arguments.get("where", "").strip() or None
+            max_results = int(arguments.get("max_results", 50) or 50)
+            etm_projects = client.list_etm_projects()
+            etm_match = _find_by_identifier(etm_projects, etm_proj)
+            if not etm_match:
+                return [TextContent(type="text",
+                    text=f"ETM project not found: {etm_proj}.")]
+            ters = client.list_test_execution_records(etm_match['url'], where, max_results)
+            if not ters:
+                return [TextContent(type="text", text=(
+                    f"No test execution records in ETM project "
+                    f"'{etm_match['title']}'."
+                ))]
+            lines = [f"# Test Execution Records in {etm_match['title']}", "",
+                     f"**{len(ters)} TER(s)**", ""]
+            for t in ters:
+                lines.append(f"- **{t.get('identifier', '?')}** — [{t.get('title', '?')}]({t.get('url', '')})")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "create_test_plan":
+            etm_proj = arguments.get("etm_project", "").strip()
+            title = arguments.get("title", "").strip()
+            description = arguments.get("description", "").strip()
+            if not etm_proj or not title:
+                return [TextContent(type="text", text="Error: etm_project and title are required.")]
+            etm_projects = client.list_etm_projects()
+            etm_match = _find_by_identifier(etm_projects, etm_proj)
+            if not etm_match:
+                return [TextContent(type="text", text=f"ETM project not found: {etm_proj}.")]
+            result = client.create_test_plan(etm_match['url'], title, description)
+            if result and 'error' not in result:
+                return [TextContent(type="text", text=(
+                    f"# Test Plan Created\n\n"
+                    f"**Click to open:** [{result['title']}]({result['url']})"
+                ))]
+            err = result.get('error', 'unknown') if result else 'unknown'
+            return [TextContent(type="text", text=f"Error: failed to create test plan — {err}")]
+
+        elif name == "create_test_execution_record":
+            etm_proj = arguments.get("etm_project", "").strip()
+            title = arguments.get("title", "").strip()
+            tc_url = arguments.get("test_case_url", "").strip()
+            description = arguments.get("description", "").strip()
+            if not etm_proj or not title or not tc_url:
+                return [TextContent(type="text", text="Error: etm_project, title, and test_case_url are required.")]
+            etm_projects = client.list_etm_projects()
+            etm_match = _find_by_identifier(etm_projects, etm_proj)
+            if not etm_match:
+                return [TextContent(type="text", text=f"ETM project not found: {etm_proj}.")]
+            result = client.create_test_execution_record(etm_match['url'], title, tc_url, description)
+            if result and 'error' not in result:
+                return [TextContent(type="text", text=(
+                    f"# Test Execution Record Created\n\n"
+                    f"**Click to open:** [{result['title']}]({result['url']})\n"
+                    f"**Runs test case:** {tc_url}\n\n"
+                    f"Pair with `create_test_result` to record pass/fail."
+                ))]
+            err = result.get('error', 'unknown') if result else 'unknown'
+            return [TextContent(type="text", text=f"Error: failed to create TER — {err}")]
+
         elif name == "get_ewm_workitem_types":
             ewm_proj_arg = arguments.get("ewm_project", "")
             if not ewm_proj_arg:
@@ -6638,7 +6925,7 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (55 tools, 9 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (62 tools, 9 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

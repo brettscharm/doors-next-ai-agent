@@ -14,6 +14,152 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 import requests
+import time as _time
+
+
+class ELMSession(requests.Session):
+    """`requests.Session` subclass that adds three robustness behaviors
+    every existing call site benefits from automatically (no call-site
+    changes anywhere in this client):
+
+    1. **Auto-retry on transient errors.** Network failures (Connection,
+       Timeout) and 408/423/503 responses get retried with backoff
+       [2s, 5s, 10s, give-up]. Other 4xx/5xx pass through unchanged.
+
+    2. **Header-driven re-auth.** Long-lived sessions can have their
+       cookie expire mid-flight; Jazz then redirects to a login page
+       which the original code parsed as XML, producing baffling
+       errors. We now detect Jazz's auth-required headers
+       (`X-com-ibm-team-repository-web-auth-msg: authrequired`,
+       `X-jazz-web-oauth-url`, etc.) and re-authenticate transparently
+       via the client's `authenticate()` method, then replay the
+       original request. Recursion-guarded so the auth call itself
+       doesn't re-trigger re-auth.
+
+    3. **Configuration-Context translation.** When a caller sets the
+       `Configuration-Context` header, we also set the matching query
+       parameter — `vvc.configuration` for local-config URLs (paths
+       containing `/cm/stream/`, `/cm/baseline/`, or `/cm/changeset/`)
+       and `oslc_config.context` for the GCM case. This was a real
+       latent bug: hard-coding the header alone errors on local-only-
+       config projects in some DNG versions.
+
+    Every behavior is opt-out via env var if it ever causes trouble:
+      ELM_MCP_DISABLE_SESSION_RETRY=1
+      ELM_MCP_DISABLE_SESSION_REAUTH=1
+      ELM_MCP_DISABLE_CONFIG_CTX_XLATE=1
+    """
+
+    _RETRY_DELAYS = (2, 5, 10)  # seconds
+    _RETRY_STATUSES = (408, 423, 503)
+    _AUTH_HEADERS = (
+        ("X-com-ibm-team-repository-web-auth-msg", "authrequired"),
+        ("X-jazz-web-oauth-url", None),
+        ("X-JSA-AUTHORIZATION-REDIRECT", None),
+        ("X-JSA-APP-PASSWORD-REDIRECT", None),
+    )
+
+    def __init__(self, *args, client_ref=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._client_ref = client_ref
+        self._reauth_in_progress = False
+        self._retry_disabled = os.environ.get(
+            "ELM_MCP_DISABLE_SESSION_RETRY", "0") == "1"
+        self._reauth_disabled = os.environ.get(
+            "ELM_MCP_DISABLE_SESSION_REAUTH", "0") == "1"
+        self._cfg_xlate_disabled = os.environ.get(
+            "ELM_MCP_DISABLE_CONFIG_CTX_XLATE", "0") == "1"
+
+    def request(self, method, url, **kwargs):
+        # 1. Configuration-Context header → query-param translation
+        if not self._cfg_xlate_disabled:
+            kwargs = self._translate_config_context(url, kwargs)
+
+        # 2. Retry loop wrapping the actual call
+        last_resp = None
+        last_exc = None
+        max_attempts = 1 if self._retry_disabled else (len(self._RETRY_DELAYS) + 1)
+        for attempt in range(max_attempts):
+            try:
+                resp = super().request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    _time.sleep(self._RETRY_DELAYS[attempt])
+                    continue
+                raise
+            last_resp = resp
+
+            # 3. Auth-required header detection → re-auth and retry once
+            if (not self._reauth_disabled
+                    and not self._reauth_in_progress
+                    and self._needs_reauth(resp)):
+                if (self._client_ref
+                        and hasattr(self._client_ref, "authenticate")):
+                    self._reauth_in_progress = True
+                    try:
+                        self._client_ref.authenticate()
+                    finally:
+                        self._reauth_in_progress = False
+                    # Retry the original request with the freshened session
+                    try:
+                        return super().request(method, url, **kwargs)
+                    except (requests.ConnectionError, requests.Timeout):
+                        return resp  # give up; caller deals
+
+            # Retry on transient HTTP statuses
+            if (resp.status_code in self._RETRY_STATUSES
+                    and attempt < max_attempts - 1):
+                _time.sleep(self._RETRY_DELAYS[attempt])
+                continue
+
+            return resp
+
+        if last_exc:
+            raise last_exc
+        return last_resp
+
+    def _needs_reauth(self, resp) -> bool:
+        # 401 is the textbook signal
+        if resp.status_code == 401:
+            return True
+        # Jazz uses headers to redirect to login while returning 200
+        for header_name, expected_value in self._AUTH_HEADERS:
+            val = resp.headers.get(header_name)
+            if val is None:
+                continue
+            if expected_value is None:
+                if val.strip():
+                    return True
+            elif val.strip().lower() == expected_value:
+                return True
+        return False
+
+    def _translate_config_context(self, url: str, kwargs: dict) -> dict:
+        """If the caller set Configuration-Context as a header, also add
+        the matching query param. Don't override an existing param; don't
+        mutate the caller's dicts."""
+        headers = kwargs.get("headers") or {}
+        cfg = headers.get("Configuration-Context", "") if headers else ""
+        if not cfg:
+            return kwargs
+
+        if any(seg in url for seg in ("/cm/stream/", "/cm/baseline/", "/cm/changeset/")):
+            param_name = "vvc.configuration"
+        else:
+            param_name = "oslc_config.context"
+
+        params = kwargs.get("params") or {}
+        if isinstance(params, dict):
+            if param_name in params:
+                return kwargs
+            new_params = dict(params)
+            new_params[param_name] = cfg
+            new_kwargs = dict(kwargs)
+            new_kwargs["params"] = new_params
+            return new_kwargs
+        # If params is something exotic (list of tuples, etc.), leave it alone
+        return kwargs
 
 
 class DOORSNextClient:
@@ -67,7 +213,11 @@ class DOORSNextClient:
 
         self.username = username
         self.password = password
-        self.session = requests.Session()
+        # ELMSession adds retry / re-auth / config-context translation
+        # transparently; existing self.session.get/post/put call sites
+        # don't change. Pass `client_ref=self` so the session can call
+        # authenticate() back on us when it detects auth-required.
+        self.session = ELMSession(client_ref=self)
         self.session.verify = verify_ssl
         self._authenticated = False
 
@@ -301,6 +451,216 @@ class DOORSNextClient:
             return []
 
     # ── Search ────────────────────────────────────────────────
+
+    def resolve_requirement_id(self, project_url: str,
+                                requirement_id: str) -> Optional[Dict]:
+        """Look up a DNG requirement by its short identifier (e.g. '123'
+        or 'REQ-123') and return the full URL plus title.
+
+        Modelled after IBM ELM-Python-Client's
+        `RM.resolve_reqid_to_core_uri`. Uses OSLC where on the project's
+        query capability with `dcterms:identifier`. If a numeric prefix
+        like 'REQ-' or 'NFR-' is given, strips it and tries the numeric
+        portion (DNG stores identifier as the integer typically).
+
+        Returns: {'id', 'title', 'url'} or None on failure / no match.
+        """
+        self._ensure_auth()
+        if not requirement_id:
+            return None
+        # Normalize: strip optional prefix (REQ-, NFR-, etc.) → numeric part
+        import re as _re
+        m = _re.match(r'^[A-Za-z\-_]+(\d+)$', requirement_id.strip())
+        numeric = m.group(1) if m else requirement_id.strip()
+        candidates = []
+        if numeric != requirement_id.strip():
+            candidates.append(numeric)
+        candidates.append(requirement_id.strip())
+
+        # Discover the OSLC query capability for the project
+        query_url = self._get_oslc_query_capability(project_url)
+        if not query_url:
+            return None
+
+        ns = self._NS_OSLC
+        for cand in candidates:
+            try:
+                params = {
+                    'oslc.where': f'dcterms:identifier="{cand}"',
+                    'oslc.select': 'dcterms:identifier,dcterms:title',
+                    'oslc.pageSize': '5',
+                }
+                resp = self.session.get(
+                    query_url,
+                    params=params,
+                    headers={
+                        'Accept': 'application/rdf+xml',
+                        'OSLC-Core-Version': '2.0',
+                    },
+                    timeout=self._TIMEOUT,
+                )
+                if resp.status_code != 200:
+                    continue
+                root = ET.fromstring(resp.content)
+                for req_el in root.findall('.//oslc_rm:Requirement', ns):
+                    about = req_el.get(f'{{{ns["rdf"]}}}about', '')
+                    title_el = req_el.find('dcterms:title', ns)
+                    id_el = req_el.find('dcterms:identifier', ns)
+                    if about:
+                        return {
+                            'id': (id_el.text if id_el is not None else cand),
+                            'title': (title_el.text if title_el is not None else ''),
+                            'url': about,
+                        }
+                # Some servers return Description elements rather than
+                # typed Requirement — try that shape too
+                for d in root.findall(f'.//{{{ns["rdf"]}}}Description'):
+                    about = d.get(f'{{{ns["rdf"]}}}about', '')
+                    if not about or '/resources/' not in about:
+                        continue
+                    title_el = d.find('dcterms:title', ns)
+                    id_el = d.find('dcterms:identifier', ns)
+                    if id_el is not None and id_el.text and id_el.text.strip() == cand:
+                        return {
+                            'id': cand,
+                            'title': (title_el.text if title_el is not None else ''),
+                            'url': about,
+                        }
+            except Exception:
+                continue
+        return None
+
+    def _get_oslc_query_capability(self, project_url: str) -> str:
+        """Helper: get the OSLC query capability URL for a DNG project's
+        Requirement type. Cached internally on first lookup."""
+        if not hasattr(self, '_query_cap_cache'):
+            self._query_cap_cache = {}
+        if project_url in self._query_cap_cache:
+            return self._query_cap_cache[project_url]
+        try:
+            resp = self.session.get(
+                project_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return ''
+            root = ET.fromstring(resp.content)
+            ns = self._NS_OSLC
+            # Find the QueryCapability whose resourceType is Requirement
+            for qc in root.findall('.//oslc:QueryCapability', ns):
+                base_el = qc.find('oslc:queryBase', ns)
+                if base_el is None:
+                    continue
+                base_url = base_el.get(f'{{{ns["rdf"]}}}resource', '')
+                # Use first one — Requirement is the dominant case in DNG
+                if base_url:
+                    self._query_cap_cache[project_url] = base_url
+                    return base_url
+        except Exception:
+            return ''
+        return ''
+
+    def resolve_user(self, identifier: str) -> Optional[Dict]:
+        """Resolve a user identifier (URI, username, or display name) to
+        a structured user record. Bidirectional: pass either form.
+
+        Modelled after IBM ELM-Python-Client's `Project.user_nametouri_resolver`
+        / `user_uritoname_resolver`. Queries the JTS user catalog.
+
+        Returns: {'name', 'username', 'uri', 'email'} or None on no match.
+        """
+        self._ensure_auth()
+        if not identifier:
+            return None
+        ident = identifier.strip()
+        # Detect URI form
+        if ident.startswith('http'):
+            return self._fetch_user_by_uri(ident)
+        # Otherwise treat as a name/username and query the user catalog
+        try:
+            users_url = f"{self.jts_url}/users"
+            resp = self.session.get(
+                users_url,
+                params={
+                    'oslc.where': f'foaf:name="{ident}"',
+                    'oslc.select': 'foaf:name,foaf:nick,foaf:mbox',
+                    'oslc.pageSize': '5',
+                },
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                # Try by username (foaf:nick) instead of display name
+                resp = self.session.get(
+                    users_url,
+                    params={
+                        'oslc.where': f'foaf:nick="{ident}"',
+                        'oslc.select': 'foaf:name,foaf:nick,foaf:mbox',
+                        'oslc.pageSize': '5',
+                    },
+                    headers={
+                        'Accept': 'application/rdf+xml',
+                        'OSLC-Core-Version': '2.0',
+                    },
+                    timeout=self._TIMEOUT,
+                )
+                if resp.status_code != 200:
+                    return None
+            root = ET.fromstring(resp.content)
+            foaf_ns = 'http://xmlns.com/foaf/0.1/'
+            ns = self._NS_OSLC
+            for d in root.findall(f'.//{{{ns["rdf"]}}}Description'):
+                about = d.get(f'{{{ns["rdf"]}}}about', '')
+                name_el = d.find(f'{{{foaf_ns}}}name')
+                nick_el = d.find(f'{{{foaf_ns}}}nick')
+                mbox_el = d.find(f'{{{foaf_ns}}}mbox')
+                if about:
+                    return {
+                        'name': (name_el.text if name_el is not None else ''),
+                        'username': (nick_el.text if nick_el is not None else ''),
+                        'uri': about,
+                        'email': (mbox_el.get(f'{{{ns["rdf"]}}}resource', '')
+                                  if mbox_el is not None else ''),
+                    }
+        except Exception:
+            return None
+        return None
+
+    def _fetch_user_by_uri(self, uri: str) -> Optional[Dict]:
+        """Reverse: dereference a user URI to get name/email."""
+        try:
+            resp = self.session.get(
+                uri,
+                headers={'Accept': 'application/rdf+xml',
+                         'OSLC-Core-Version': '2.0'},
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+            root = ET.fromstring(resp.content)
+            foaf_ns = 'http://xmlns.com/foaf/0.1/'
+            ns = self._NS_OSLC
+            for d in root.findall(f'.//{{{ns["rdf"]}}}Description'):
+                name_el = d.find(f'{{{foaf_ns}}}name')
+                nick_el = d.find(f'{{{foaf_ns}}}nick')
+                mbox_el = d.find(f'{{{foaf_ns}}}mbox')
+                return {
+                    'name': (name_el.text if name_el is not None else ''),
+                    'username': (nick_el.text if nick_el is not None else ''),
+                    'uri': uri,
+                    'email': (mbox_el.get(f'{{{ns["rdf"]}}}resource', '')
+                              if mbox_el is not None else ''),
+                }
+        except Exception:
+            return None
+        return None
 
     def search_requirements(self, project_url: str, query: str,
                              max_results: int = 20) -> List[Dict]:
@@ -2531,6 +2891,220 @@ class DOORSNextClient:
             return factories
         except Exception:
             return {}
+
+    def _get_etm_query_capabilities(self, service_provider_url: str) -> Dict[str, str]:
+        """Discover query capability URLs per ETM resource type.
+
+        Returns dict like {'TestCase': '<url>', 'TestPlan': '<url>',
+        'TestExecutionRecord': '<url>', 'TestResult': '<url>'}.
+        """
+        try:
+            resp = self.session.get(
+                service_provider_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return {}
+            root = ET.fromstring(resp.content)
+            ns = self._NS_OSLC
+            caps: Dict[str, str] = {}
+            for qc in root.findall('.//oslc:QueryCapability', ns):
+                base_el = qc.find('oslc:queryBase', ns)
+                if base_el is None:
+                    continue
+                base_url = base_el.get(f'{{{ns["rdf"]}}}resource', '')
+                if not base_url:
+                    continue
+                for rt in qc.findall('oslc:resourceType', ns):
+                    rt_uri = rt.get(f'{{{ns["rdf"]}}}resource', '')
+                    if 'TestCase' in rt_uri:
+                        caps['TestCase'] = base_url
+                    elif 'TestPlan' in rt_uri:
+                        caps['TestPlan'] = base_url
+                    elif 'TestExecutionRecord' in rt_uri:
+                        caps['TestExecutionRecord'] = base_url
+                    elif 'TestResult' in rt_uri:
+                        caps['TestResult'] = base_url
+                    elif 'TestScript' in rt_uri:
+                        caps['TestScript'] = base_url
+            return caps
+        except Exception:
+            return {}
+
+    def list_test_cases(self, service_provider_url: str,
+                         where: Optional[str] = None,
+                         max_results: int = 50) -> List[Dict]:
+        """List test cases in an ETM project. Optional `where` is an
+        OSLC where clause (e.g. `dcterms:title="Login flow"`).
+
+        Returns list of {'url', 'title', 'identifier', 'state'}.
+        """
+        return self._etm_query('TestCase', service_provider_url,
+                                where, max_results)
+
+    def list_test_plans(self, service_provider_url: str,
+                         where: Optional[str] = None,
+                         max_results: int = 50) -> List[Dict]:
+        """List test plans in an ETM project."""
+        return self._etm_query('TestPlan', service_provider_url,
+                                where, max_results)
+
+    def list_test_execution_records(self, service_provider_url: str,
+                                     where: Optional[str] = None,
+                                     max_results: int = 50) -> List[Dict]:
+        """List test execution records (TERs) in an ETM project."""
+        return self._etm_query('TestExecutionRecord', service_provider_url,
+                                where, max_results)
+
+    def _etm_query(self, kind: str, service_provider_url: str,
+                    where: Optional[str], max_results: int) -> List[Dict]:
+        """Generic ETM OSLC query helper. kind is TestCase / TestPlan /
+        TestExecutionRecord / TestResult / TestScript."""
+        self._ensure_auth()
+        caps = self._get_etm_query_capabilities(service_provider_url)
+        query_url = caps.get(kind, '')
+        if not query_url:
+            return []
+        params = {
+            'oslc.select': 'dcterms:title,dcterms:identifier,oslc:status',
+            'oslc.pageSize': str(max(1, min(max_results, 200))),
+        }
+        if where:
+            params['oslc.where'] = where
+        try:
+            resp = self.session.get(
+                query_url,
+                params=params,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return []
+            root = ET.fromstring(resp.content)
+            ns = self._NS_OSLC
+            qm_ns = 'http://open-services.net/ns/qm#'
+            results: List[Dict] = []
+            # Look for typed elements first (TestCase, TestPlan, etc.)
+            typed_qname = f'{{{qm_ns}}}{kind}'
+            elements = list(root.iter(typed_qname))
+            if not elements:
+                # Fallback: any rdf:Description with the right URI shape
+                elements = [d for d in root.findall(f'.//{{{ns["rdf"]}}}Description')
+                            if kind.lower() in (d.get(f'{{{ns["rdf"]}}}about', '') or '').lower()]
+            for el in elements[:max_results]:
+                about = el.get(f'{{{ns["rdf"]}}}about', '')
+                title_el = el.find('dcterms:title', ns)
+                id_el = el.find('dcterms:identifier', ns)
+                status_el = el.find('oslc:status', ns)
+                results.append({
+                    'url': about,
+                    'title': (title_el.text or '').strip() if title_el is not None else '',
+                    'identifier': (id_el.text or '').strip() if id_el is not None else '',
+                    'state': (status_el.text or '').strip() if status_el is not None else '',
+                })
+            return results
+        except Exception:
+            return []
+
+    def create_test_plan(self, service_provider_url: str, title: str,
+                          description: str = '') -> Optional[Dict]:
+        """Create a Test Plan in ETM. Test plans hold strategy, scope,
+        and reference one or more test cases. Use for organizing test
+        execution at the release / sprint / feature level."""
+        self._ensure_auth()
+        factories = self._get_etm_creation_factories(service_provider_url)
+        creation_url = factories.get('TestPlan')
+        if not creation_url:
+            return {'error': 'No TestPlan creation factory found for this project'}
+        clean_title = title.strip()
+        rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:oslc_qm="http://open-services.net/ns/qm#">
+  <oslc_qm:TestPlan>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
+    <dcterms:description>{self._escape_xml(description or "")}</dcterms:description>
+  </oslc_qm:TestPlan>
+</rdf:RDF>'''
+        try:
+            resp = self.session.post(
+                creation_url,
+                data=rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code in [200, 201]:
+                return {
+                    'title': clean_title,
+                    'url': resp.headers.get('Location', ''),
+                }
+            err = self._extract_oslc_error(resp.text)
+            return {'error': f"HTTP {resp.status_code}: {err}" if err else f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def create_test_execution_record(self, service_provider_url: str,
+                                      title: str,
+                                      test_case_url: str,
+                                      description: str = '') -> Optional[Dict]:
+        """Create a Test Execution Record (TER) in ETM. A TER is an
+        instance of running a particular test case — typically created
+        per release/iteration. Test results then attach to the TER."""
+        self._ensure_auth()
+        factories = self._get_etm_creation_factories(service_provider_url)
+        creation_url = factories.get('TestExecutionRecord')
+        if not creation_url:
+            return {'error': 'No TestExecutionRecord creation factory found'}
+        clean_title = title.strip()
+        tc_link = ""
+        if test_case_url:
+            tc_link = (
+                f'\n    <oslc_qm:runsTestCase '
+                f'rdf:resource="{test_case_url}"/>'
+            )
+        rdf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dcterms="http://purl.org/dc/terms/"
+         xmlns:oslc_qm="http://open-services.net/ns/qm#">
+  <oslc_qm:TestExecutionRecord>
+    <dcterms:title>{self._escape_xml(clean_title)}</dcterms:title>
+    <dcterms:description>{self._escape_xml(description or "")}</dcterms:description>{tc_link}
+  </oslc_qm:TestExecutionRecord>
+</rdf:RDF>'''
+        try:
+            resp = self.session.post(
+                creation_url,
+                data=rdf.encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/rdf+xml',
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code in [200, 201]:
+                return {
+                    'title': clean_title,
+                    'url': resp.headers.get('Location', ''),
+                    'test_case': test_case_url,
+                }
+            err = self._extract_oslc_error(resp.text)
+            return {'error': f"HTTP {resp.status_code}: {err}" if err else f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {'error': str(e)}
 
     def create_test_case(self, service_provider_url: str, title: str,
                           description: str = '',
