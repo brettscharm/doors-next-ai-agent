@@ -822,10 +822,49 @@ def main() -> int:
     print()
     test_credentials()
 
-    print(f"\n{GREEN}{BOLD}Setup complete.{RESET}")
-    print("  Open your AI assistant (reload its window if it was already open) and say:")
-    print(f"  {BOLD}'Connect to ELM and list projects'{RESET}\n")
-    print(f"  {DIM}Re-test any time:  python3 setup.py --diagnose{RESET}")
+    print(f"\n{GREEN}{BOLD}Setup complete.{RESET}\n")
+
+    # ── Finale: tell the user EXACTLY what to do next in Bob ────────
+    py_path = sys.executable
+    server_path = str((HERE / SERVER_SCRIPT).resolve())
+    print(f"{BOLD}Next steps:{RESET}\n")
+    print(f"  {BOLD}1. Fully quit Bob{RESET} (Cmd+Q on Mac, not just close window),")
+    print(f"     {BOLD}then reopen.{RESET}")
+    print()
+    print(f"  {BOLD}2. In Bob's chat, say:{RESET}")
+    print(f"     {GREEN}'Connect to ELM and list my projects'{RESET}")
+    print()
+    print(f"  {BOLD}3. If Bob doesn't see ELM MCP after restart{RESET} — some Bob versions")
+    print(f"     {BOLD}don't auto-pick-up new entries in `~/.bob/mcp_settings.json`. Add it manually:{RESET}\n")
+    print(f"     a) Open Bob → Settings → MCP Servers (or equivalent menu)")
+    print(f"     b) Click 'Add Server' (or 'New Server' / '+')")
+    print(f"     c) Use these exact values:")
+    print()
+    print(f"        {BOLD}Name:{RESET}    elm-mcp")
+    print(f"        {BOLD}Command:{RESET} {py_path}")
+    print(f"        {BOLD}Args:{RESET}    {server_path}")
+    print()
+    print(f"     d) Save. Bob may ask you to restart again.")
+    print()
+    print(f"  {BOLD}If Bob's UI doesn't have an Add-Server form{RESET}, paste this JSON")
+    print(f"  into {DIM}~/.bob/mcp_settings.json{RESET} under the {DIM}mcpServers{RESET} key:\n")
+    import json as _json
+    config_snippet = {
+        "elm-mcp": {
+            "command": py_path,
+            "args": [server_path],
+            "alwaysAllow": list(_BOB_ALWAYS_ALLOW),
+        }
+    }
+    snippet_text = _json.dumps(config_snippet, indent=2)
+    # Indent each line for visual clarity
+    for line in snippet_text.split("\n"):
+        print(f"    {line}")
+    print()
+    print(f"  {DIM}Re-test any time:        python3 setup.py --diagnose{RESET}")
+    print(f"  {DIM}Re-print this config:    python3 setup.py --print-config{RESET}")
+    print(f"  {DIM}Network timeout in Bob:  set to 120000 (2 min) so batch creates don't time out{RESET}")
+    print()
     return 0
 
 

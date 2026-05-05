@@ -66,7 +66,23 @@ fi
 # ── Run setup.py ─────────────────────────────────────────────
 step "[3/4] Running setup.py (deps + AI host config + smoke test)"
 cd "$INSTALL_DIR"
-"$PY" setup.py
+# CRITICAL: when this script is invoked via `curl ... | bash`, bash
+# itself is reading the pipe and stdin is already consumed. setup.py's
+# input() / getpass() calls would hit EOF immediately and silently
+# skip credential entry. Re-attach stdin to the user's terminal so
+# prompts actually work. If we're already in a terminal (no pipe),
+# do nothing special.
+if [ -t 0 ]; then
+  "$PY" setup.py
+elif [ -e /dev/tty ]; then
+  "$PY" setup.py < /dev/tty
+else
+  # No terminal available at all — non-interactive environment (CI,
+  # Docker without -t, etc.). Run setup but warn the user that they'll
+  # need to add credentials manually.
+  printf "  %sNo terminal available — credentials will need to be added manually to ~/.elm-mcp/.env%s\n" "$DIM" "$RESET"
+  "$PY" setup.py
+fi
 
 # ── Done ─────────────────────────────────────────────────────
 step "[4/4] Done — and here's the manual-fallback info"
@@ -96,23 +112,32 @@ say ""
 cat <<JSON
 {
   "mcpServers": {
-    "doors-next": {
+    "elm-mcp": {
       "command": "$PY_ABS",
       "args": [
         "$SERVER_ABS"
       ],
       "alwaysAllow": [
-        "connect_to_elm", "list_projects", "get_modules",
-        "get_module_requirements", "save_requirements",
-        "search_requirements", "get_artifact_types", "get_link_types",
-        "get_attribute_definitions", "list_baselines",
-        "compare_baselines", "extract_pdf",
+        "connect_to_elm", "list_projects", "list_capabilities",
+        "elm_mcp_health", "update_elm_mcp",
+        "get_modules", "get_module_requirements", "search_requirements",
+        "get_artifact_types", "get_link_types",
+        "get_attribute_definitions", "find_folder",
+        "list_baselines", "compare_baselines", "extract_pdf",
+        "resolve_requirement_id", "resolve_user",
+        "get_ewm_workitem_types", "get_workflow_states",
+        "query_work_items",
+        "list_test_cases", "list_test_plans",
+        "list_test_execution_records",
         "list_global_configurations", "list_global_components",
-        "get_global_config_details", "query_work_items",
+        "get_global_config_details",
         "scm_list_projects", "scm_list_changesets",
         "scm_get_changeset", "scm_get_workitem_changesets",
-        "review_get", "review_list_open", "generate_chart",
-        "update_elm_mcp"
+        "review_get", "review_list_open",
+        "build_new_project", "build_from_existing",
+        "build_project_next", "build_project_status",
+        "build_project_resume", "wrap_up_session",
+        "get_team_actions", "generate_traceability_matrix"
       ]
     }
   }
