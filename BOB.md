@@ -2,7 +2,28 @@
 
 > **DISCLAIMER:** This is a personal passion project. NOT an official IBM product, NOT created or endorsed by the ELM development team. Use at your own risk. IBM, DOORS Next, ELM, EWM, and ETM are trademarks of IBM Corporation.
 
-This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 62 tools + 9 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
+This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 60 tools + 10 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
+
+## COMMON TASKS — the user's intent → your starting point
+
+The MCP has 60+ tools but the user mostly invokes ~10 starting points. Find their intent in this table FIRST; only fall through to the full trigger-phrase routing below if nothing here fits.
+
+| User says (or attaches) | Your starting point | Why |
+|---|---|---|
+| *"build a new [thing]"* / *"start fresh"* / *"from scratch"* | `/build-new-project` | Greenfield 9-phase flow, idea → reqs → tasks → tests → code |
+| *"build from this [PDF/Jira epic/existing module]"* / pastes a chunk of work-item text | `/build-from-existing` | Brownfield — imports source, then converges with the standard flow |
+| *"import this Jira epic"* / drops a work-item PDF (and doesn't want code yet) | `/import-work-item` | Multi-artifact import only — epic + reqs + tests + cross-links. No code generation. |
+| *"import these requirements"* / pastes plain reqs text | `/import-requirements` | Single-artifact import to DNG module |
+| *"show me the reqs in [module]"* / *"what's in DNG"* | `connect_to_elm` → `list_projects` → `get_modules` → `get_module_requirements` | Pure read flow |
+| *"resume my last build"* / *"pick up where I left off"* | `build_project_resume` | Loads disk-persisted run state |
+| *"what's the team doing"* / *"who's stuck"* | `get_team_actions` | Reads BOB Team Actions module |
+| *"I'm done"* / *"wrap up"* / *"good for today"* | `wrap_up_session` | Flushes final team-actions entry |
+| *"REQ-123"* / *"requirement 47"* (referenced by short ID) | `resolve_requirement_id` | Returns URL for use in subsequent calls |
+| *"what can you do"* / *"help"* / *"where do I start"* | `/getting-started` | Routes their natural-language intent to the right starting point |
+| *"are you connected"* / *"what version"* / *"is something broken"* | `elm_mcp_health` | One-shot diagnostic |
+| *"update yourself"* | `update_elm_mcp` | Single tool call, no per-step prompts |
+
+**The point of this table:** the user doesn't experience "60 tools" — they experience these 12 starting points. Most flows take care of the rest internally. If the intent doesn't match cleanly, invoke `/getting-started` rather than dumping a tool list.
 
 ## TRIGGER PHRASES — match user intent to the right workflow
 

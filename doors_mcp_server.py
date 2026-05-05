@@ -74,7 +74,7 @@ load_dotenv()
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("doors-next-server")
@@ -840,6 +840,28 @@ def _find_by_identifier(items: List[Dict], identifier: str, key: str = 'title') 
 async def list_prompts() -> list[Prompt]:
     return [
         Prompt(
+            name="getting-started",
+            description=(
+                "Use-case-first orientation for users new to the ELM "
+                "MCP. Routes the user's natural-language intent ('I "
+                "want to import a Jira epic', 'I want to build a new "
+                "service end-to-end', 'show me what's already in "
+                "DNG', etc.) to the right prompt or tool. The output "
+                "is a single guided question + a recommended next "
+                "step — not an enumerated tool list. Call this "
+                "whenever the user says 'help', 'what can you do', "
+                "'where do I start', or otherwise signals they don't "
+                "know which prompt fits their need."
+            ),
+            arguments=[
+                PromptArgument(
+                    name="intent",
+                    description="What the user wants to do, in their own words. Optional — if missing, the AI asks one clarifying question.",
+                    required=False,
+                ),
+            ],
+        ),
+        Prompt(
             name="generate-requirements",
             description=(
                 "Generate IEEE 29148-compliant requirements for a system or feature. "
@@ -1006,21 +1028,6 @@ async def list_prompts() -> list[Prompt]:
             ],
         ),
         Prompt(
-            name="build-project",
-            description=(
-                "Legacy alias for /build-new-project (greenfield flow). Kept for "
-                "backward compatibility. Prefer /build-new-project (greenfield) "
-                "or /build-from-existing (brownfield) explicitly."
-            ),
-            arguments=[
-                PromptArgument(name="project_idea", description="One-line description of what to build.", required=True),
-                PromptArgument(name="dng_project", description="DNG project name. Optional.", required=False),
-                PromptArgument(name="ewm_project", description="EWM project name. Optional.", required=False),
-                PromptArgument(name="etm_project", description="ETM project name. Optional.", required=False),
-                PromptArgument(name="tier_mode", description="'single' or 'tiered'. Default 'single'.", required=False),
-            ],
-        ),
-        Prompt(
             name="build-new-project",
             description=(
                 "Greenfield agentic build — start from a one-line idea, generate "
@@ -1084,6 +1091,58 @@ async def list_prompts() -> list[Prompt]:
 @app.get_prompt()
 async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMessage]:
     args = arguments or {}
+
+    if name == "getting-started":
+        intent = (args.get("intent", "") or "").strip()
+        if not intent:
+            return [PromptMessage(
+                role="user",
+                content=TextContent(type="text", text=(
+                    "The user invoked /getting-started without an "
+                    "intent. Ask them ONE question, no longer than two "
+                    "lines:\n\n"
+                    "*\"What are you trying to do? A few common starting "
+                    "points: (a) build a new project from scratch, (b) "
+                    "import existing requirements / Jira epic / PDF, "
+                    "(c) read or edit existing reqs in DNG, (d) check "
+                    "what the team's been doing, (e) something else — "
+                    "tell me in your own words.\"*\n\n"
+                    "When they answer, route their intent using the "
+                    "table below. Don't enumerate tools — just take "
+                    "them straight to the right starting point.\n\n"
+                    "Routing table (intent → next action):\n"
+                    "- *build a new project / new service / from scratch* → invoke `/build-new-project`\n"
+                    "- *import a Jira epic / work-item PDF / paste reqs* → invoke `/import-work-item` (multi-artifact) or `/import-requirements` (just reqs)\n"
+                    "- *read / show / list reqs in [module]* → call `connect_to_elm` if needed, then `list_projects` → `get_modules` → `get_module_requirements`\n"
+                    "- *what's the team doing / who's stuck / status* → call `get_team_actions`\n"
+                    "- *resume a paused build* → call `build_project_resume`\n"
+                    "- *create tasks / tests for existing reqs* → invoke `/full-lifecycle` (covers tasks + tests for reqs already created)\n"
+                    "- *find a requirement by ID (REQ-123)* → call `resolve_requirement_id`\n"
+                    "- *check ELM connection / version / what's installed* → call `elm_mcp_health` or `list_capabilities`\n"
+                    "- *something else* → ask one more clarifying question; do NOT dump a tool list"
+                )),
+            )]
+        # Intent provided — route directly
+        return [PromptMessage(
+            role="user",
+            content=TextContent(type="text", text=(
+                f"User's intent: \"{intent}\"\n\n"
+                f"Match this intent to the right starting point and "
+                f"invoke it. Use this routing table:\n\n"
+                f"- *build a new project / new service / from scratch* → invoke `/build-new-project` with their idea\n"
+                f"- *import a Jira epic / work-item PDF / paste reqs / brownfield* → invoke `/import-work-item` (multi-artifact) or `/import-requirements` (just reqs) depending on what they have\n"
+                f"- *read / show / list reqs in a module* → call `connect_to_elm` if needed, then `list_projects` → `get_modules` → `get_module_requirements`\n"
+                f"- *what's the team doing / who's stuck / status* → call `get_team_actions`\n"
+                f"- *resume a paused build* → call `build_project_resume`\n"
+                f"- *create tasks / tests for existing reqs* → `/full-lifecycle`\n"
+                f"- *find a requirement by ID* → `resolve_requirement_id`\n"
+                f"- *check ELM connection / version* → `elm_mcp_health` or `list_capabilities`\n"
+                f"- *anything else* → ask ONE more clarifying question, never dump a tool list\n\n"
+                f"DO NOT enumerate every tool. The user came here to "
+                f"start a task, not browse an inventory. Take them "
+                f"straight to the right starting point."
+            )),
+        )]
 
     if name == "generate-requirements":
         system_desc = args.get("system_description", "")
@@ -1552,142 +1611,11 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
             )),
         )]
 
-    elif name == "build-project":
-        idea = args.get("project_idea", "")
-        dng = args.get("dng_project", "")
-        ewm = args.get("ewm_project", "")
-        etm = args.get("etm_project", "")
-        tier_mode = (args.get("tier_mode", "") or "single").lower()
-        proj_lines = []
-        if dng: proj_lines.append(f"DNG project: {dng}")
-        if ewm: proj_lines.append(f"EWM project: {ewm}")
-        if etm: proj_lines.append(f"ETM project: {etm}")
-        proj_block = "\n".join(proj_lines) if proj_lines else "Ask me which projects to use for each domain if not obvious."
+    # `build-project` prompt removed in v0.5.0. Use /build-new-project
+    # (greenfield) or /build-from-existing (brownfield) instead.
 
-        return [PromptMessage(
-            role="user",
-            content=TextContent(type="text", text=(
-                f"# Build a project end-to-end with ELM as the system of record\n\n"
-                f"**Project idea:** {idea}\n\n"
-                f"{proj_block}\n\n"
-                f"**Tier mode:** {tier_mode} "
-                f"({'Business → Stakeholder → System in 3 modules with Satisfies links' if tier_mode == 'tiered' else 'one System Requirements module'})\n\n"
-                f"You are the agent driving an end-to-end agentic-development "
-                f"workflow. The full sequence is below. **Each phase has an "
-                f"explicit user-approval gate. Never skip a gate. Never push "
-                f"without preview. Surface every artifact URL as a clickable "
-                f"markdown link — never paraphrase to a /rm landing page.**\n\n"
-                f"---\n\n"
-                f"## PHASE 0 — Verify connection and project access\n"
-                f"Call `connect_to_elm` (if not connected). Confirm with me which "
-                f"DNG / EWM / ETM projects to use; offer `list_projects` if I "
-                f"don't know.\n\n"
-                f"## PHASE 1 — Project intake (interview)\n"
-                f"Confirm the project idea by asking 4–6 quick questions:\n"
-                f"- What's the user-facing description (one paragraph)?\n"
-                f"- Tech stack / platform constraints (web app? embedded? service?)\n"
-                f"- Standards or compliance (DO-178C, ISO 26262, NIST, none, etc.)\n"
-                f"- Approximate scale (5–10 reqs / 20+ reqs / massive)\n"
-                f"- Integrations or external interfaces?\n"
-                f"- Anything specific I MUST or MUST NOT include?\n\n"
-                f"Confirm a one-line scope summary back to me before moving on.\n\n"
-                f"## PHASE 2 — Requirements (DNG)\n"
-                f"Run **Step 3b** (single-tier) or **Step 3g** (tiered) per the "
-                f"`tier_mode` argument above. For each tier in tiered mode:\n"
-                f"  • Generate requirements internally\n"
-                f"  • Show a preview table grouped by proposed module with "
-                f"rationale per group\n"
-                f"  • Wait for my explicit 'yes' / 'go ahead'\n"
-                f"  • Push via `create_requirements` with `module_name` set "
-                f"(auto-binds to the module)\n"
-                f"  • Surface direct module + requirement URLs as markdown links\n\n"
-                f"**Server-side validation will reject** requirement bodies "
-                f"containing 'Acceptance Criteria', 'Business Value', "
-                f"'Stakeholder Need', 'Test Steps', etc. — those go in test "
-                f"cases (or in a separate StR/BR tier). Each requirement body "
-                f"must be a clean 'shall' statement with optional 'Rationale:' "
-                f"line.\n\n"
-                f"## PHASE 3 — Implementation tasks (EWM)\n"
-                f"Run **Step 3d**. Once Phase 2 is approved + pushed, generate "
-                f"one EWM Task per System Requirement (the lowest tier). "
-                f"Verb-first titles. Brief body — no copy of the requirement "
-                f"text (it's linked). Preview → my approval → push with "
-                f"`requirement_url` for every task.\n\n"
-                f"## PHASE 4 — Test cases (ETM)\n"
-                f"Run **Step 3e**. Same as tasks but generating Test Cases "
-                f"with full preconditions / steps / pass-fail. Preview → "
-                f"approval → push linked to each requirement via "
-                f"`requirement_url`.\n\n"
-                f"## PHASE 5 — Hand-off pause\n"
-                f"**STOP HERE. Do not write any code.** Tell me:\n\n"
-                f"  > 'Phase 2–4 complete. Open ELM and review:\n"
-                f"  >   • DNG: <module markdown links>\n"
-                f"  >   • EWM: <task list — links>\n"
-                f"  >   • ETM: <test case list — links>\n"
-                f"  > In ELM you can:\n"
-                f"  >   - approve / reject / modify any requirement\n"
-                f"  >   - mark requirements 'Approved' (only Approved reqs "
-                f"will drive the code in Phase 6)\n"
-                f"  >   - reassign tasks, change priorities\n"
-                f"  >   - rewrite test cases\n"
-                f"  > When you're ready, come back and say *continue* / "
-                f"*build it* / *pull latest*. I'll re-fetch everything from "
-                f"ELM (current state, not what we generated) and start "
-                f"writing the actual app code.'\n\n"
-                f"Then **wait silently for me to come back**. Do not poll, "
-                f"do not generate code, do not move on.\n\n"
-                f"## PHASE 6 — Re-pull and confirm scope\n"
-                f"When I say 'continue':\n\n"
-                f"1. Re-fetch the requirements module(s) using "
-                f"`get_module_requirements` with `filter={{\"Status\": \"Approved\"}}` "
-                f"(or whatever this project's approved-state value is — discover "
-                f"via `get_attribute_definitions` first; never guess).\n"
-                f"2. Re-fetch linked work items via `query_work_items` "
-                f"(filter to active iterations, exclude any moved out of scope).\n"
-                f"3. Re-fetch test cases for the same requirements.\n"
-                f"4. Show me the current state as a summary table:\n"
-                f"   • {{X}} approved requirements (down from {{Y}} originally — "
-                f"these were rejected/dropped)\n"
-                f"   • {{N}} active tasks\n"
-                f"   • {{M}} test cases\n"
-                f"5. Confirm: 'Building based on this current state. OK?'\n\n"
-                f"## PHASE 7 — Write the code\n"
-                f"Once I approve the current state in Phase 6, write the actual "
-                f"application code in my IDE. For each file you write, "
-                f"include a comment block linking back to the source "
-                f"requirement IDs (e.g. `# Implements REQ-005, REQ-007`). The "
-                f"code structure should mirror the requirement structure — "
-                f"each module / class / function should map to one or more "
-                f"reqs.\n\n"
-                f"**During coding, after each task is implemented:**\n"
-                f"- Call `transition_work_item` to move the task from "
-                f"'New' → 'In Development' → 'Resolved'\n"
-                f"- For each requirement implemented, you can also call "
-                f"`update_requirement_attributes` to record implementation "
-                f"status if the project has such an attribute\n\n"
-                f"## PHASE 8 — Run tests, record results, file defects on failure\n"
-                f"Once code is in place, walk the test cases:\n"
-                f"- For each test case that passes the implementation: call "
-                f"`create_test_result(test_case_url, status='passed')`\n"
-                f"- For each that fails: call `create_test_result(... status='failed')` "
-                f"AND interview me briefly to capture the failure (steps, expected "
-                f"vs actual, severity), then call `create_defect` linked to "
-                f"both the requirement and the test case URL.\n\n"
-                f"## PHASE 9 — Final summary\n"
-                f"Give me an end-of-build summary with markdown links:\n\n"
-                f"  • DNG: [Module name](url) — N reqs (M Approved, K Rejected)\n"
-                f"  • EWM: [task list](query-url) — N tasks (M Resolved, K In Progress)\n"
-                f"  • ETM: [test results](query-url) — M passed, K failed, J blocked\n"
-                f"  • Defects: [open defect list](query-url) — N open\n"
-                f"  • Code: list of files written, each with a 'Implements REQ-…' header\n\n"
-                f"---\n\n"
-                f"**REMEMBER:** the WRITE GATE rule applies to every create_* "
-                f"and update_* and transition_* tool call. Never skip the "
-                f"interview-preview-confirm gates. The user's approval is "
-                f"per-phase, not session-wide.\n\n"
-                f"Ready? Call `connect_to_elm` (if needed) and start Phase 0."
-            )),
-        )]
+    # ── Legacy /build-project prompt removed in v0.5.0 ──
+    # Use /build-new-project (greenfield) or /build-from-existing (brownfield).
 
     elif name == "build-new-project":
         idea = args.get("project_idea", "")
@@ -1980,51 +1908,9 @@ _WRITE_GATE = (
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
-        Tool(
-            name="build_project",
-            description=(
-                "🎬 START AN END-TO-END AGENTIC PROJECT BUILD with IBM ELM as the "
-                "system of record. Call this tool the moment the user mentions "
-                "'build a project', 'do an end-to-end', 'agentic build', "
-                "'build me an app/service', or any phrasing where the user wants "
-                "a new thing built and ELM should track it. The tool returns a "
-                "9-phase orchestration script you MUST follow with explicit "
-                "user-approval gates between every phase. Phases 2–4 generate "
-                "requirements + tasks + tests in ELM (with the standard write-"
-                "gate previews). Phase 5 STOPS for user review in the ELM UI. "
-                "Phase 6 re-pulls current ELM state. Phase 7 writes actual code "
-                "with 'Implements REQ-…' headers. Phase 8 transitions work "
-                "items + records test results. Do NOT skip straight to code "
-                "generation — that's the bug this tool exists to prevent."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_idea": {
-                        "type": "string",
-                        "description": "One-line description of what to build (e.g. 'a temperature converter web app', 'a fleet maintenance scheduling service')"
-                    },
-                    "dng_project": {
-                        "type": "string",
-                        "description": "DNG project name where requirements/modules will be created. Optional — tool will tell you to ask the user if not provided."
-                    },
-                    "ewm_project": {
-                        "type": "string",
-                        "description": "EWM project name where work items will be created. Optional."
-                    },
-                    "etm_project": {
-                        "type": "string",
-                        "description": "ETM project name where test cases will be created. Optional."
-                    },
-                    "tier_mode": {
-                        "type": "string",
-                        "enum": ["single", "tiered"],
-                        "description": "'single' = one System Requirements module. 'tiered' = Business → Stakeholder → System in 3 modules with Satisfies links. Default: single."
-                    }
-                },
-                "required": ["project_idea"]
-            }
-        ),
+        # `build_project` legacy tool removed in v0.5.0 — use
+        # build_new_project (greenfield) or build_from_existing
+        # (brownfield) instead.
         Tool(
             name="build_project_next",
             description=(
@@ -2396,29 +2282,9 @@ async def list_tools() -> list[Tool]:
                 "required": ["project_identifier", "module_identifier"]
             }
         ),
-        Tool(
-            name="save_requirements",
-            description=(
-                "Save requirements to a file. "
-                "Requires get_module_requirements to have been called first in this session. "
-                "Supports JSON, CSV, and Markdown formats."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "format": {
-                        "type": "string",
-                        "enum": ["json", "csv", "markdown"],
-                        "description": "Output format: json, csv, or markdown"
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "Output filename (optional - auto-generated if omitted)"
-                    }
-                },
-                "required": ["format"]
-            }
-        ),
+        # `save_requirements` removed in v0.5.0 — local-disk export is
+        # better handled by your AI host's own file-write tools. Use
+        # get_module_requirements + paste/copy if you need text out.
         Tool(
             name="create_module",
             description=(_WRITE_GATE +
@@ -3584,7 +3450,8 @@ _TEAM_LOG_TOOLS_WRITE = {
     "create_folder", "create_task", "create_defect", "update_work_item",
     "transition_work_item", "create_test_case", "create_test_script",
     "create_test_result", "create_link", "link_workitem_to_external_url",
-    "publish_build_state_to_dng", "save_requirements", "generate_chart",
+    "publish_build_state_to_dng", "generate_chart",
+    "create_test_plan", "create_test_execution_record",
 }
 _TEAM_LOG_TOOLS_PHASE = {"build_project", "build_new_project",
                          "build_from_existing", "build_project_next"}
@@ -4652,9 +4519,9 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             )
             return [TextContent(type="text", text="\n".join(lines))]
 
-        if name in ("build_project", "build_new_project", "build_from_existing"):
+        if name in ("build_new_project", "build_from_existing"):
             idea = (arguments.get("project_idea") or "").strip()
-            command_label = name  # one of build_project / build_new_project / build_from_existing
+            command_label = name  # one of build_new_project / build_from_existing
             source_kind = (arguments.get("source_kind") or "").strip().lower() if name == "build_from_existing" else ""
             source_path = (arguments.get("source_path") or "").strip() if name == "build_from_existing" else ""
             if not idea and name != "build_from_existing":
@@ -4892,72 +4759,154 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
 
         if name == "list_capabilities":
             tools = await list_tools()
+            tool_names = {t.name for t in tools}
+
+            # Use-case-first layout. Each section answers a USER intent
+            # ("I want to..."), shows the FIRST thing to call, then the
+            # follow-on tools that flow from it. Reduces "60 tools" to
+            # ~10 entry points the user actually picks from.
+            lines = [
+                f"# ELM MCP — what I can do (v{__version__})",
+                "",
+                f"**{len(tools)} tools registered.** This list is "
+                f"organized by what you want to DO, not by domain. Pick "
+                f"the row that matches your intent — each starting "
+                f"point handles the rest.",
+                "",
+                "## Common starting points",
+                "",
+                "| I want to... | Start here | Then the flow handles the rest |",
+                "|---|---|---|",
+                "| **Build a new project end-to-end** (idea → reqs → tasks → tests → code) | `/build-new-project` (or call `build_new_project` tool) | Phases 0–9 with user-approval gates between each |",
+                "| **Build from existing material** (Jira epic PDF, pasted reqs, existing DNG module) | `/build-from-existing` (or call `build_from_existing` tool) | Imports source → converges with the standard flow at Phase 5 |",
+                "| **Import a Jira epic / work-item PDF** standalone (no code yet) | `/import-work-item` | EWM epic + DNG reqs + ETM test cases + cross-links in one round |",
+                "| **Import existing reqs** as plain text (bullets, prose, Notion paste) | `/import-requirements` | Parses to atomic shall-statements → DNG module |",
+                "| **Read what's in DNG already** | `connect_to_elm` → `list_projects` → `get_modules` → `get_module_requirements` | Browse, search, export the existing project |",
+                "| **Resume a paused build** | `build_project_resume` (no args lists active runs) | Picks up at the right phase using stored state |",
+                "| **Check what the team's been doing** | `get_team_actions` | Reads BOB Team Actions module; filter by who/since/status |",
+                "| **End your work session cleanly** | `wrap_up_session` | Final entry to BOB Team Actions; teammates can pick up |",
+                "| **Generate the trace matrix for a finished build** | `generate_traceability_matrix` | req↔task↔test markdown table with clickable URLs |",
+                "| **Look up a req by its short ID** (REQ-123) | `resolve_requirement_id` | Returns URL for use in subsequent calls |",
+                "| **Diagnose: am I connected, what version, what's open** | `elm_mcp_health` | Connection state, MCP version, auto-update status, active runs |",
+                "| **Update yourself** | `update_elm_mcp` | One tool call → fetch + pull + restart instructions |",
+                "",
+                "## I'm new — where do I start?",
+                "",
+                "Just say *what you want to do*. Don't read the full "
+                "tool list — invoke `/getting-started` and the AI "
+                "routes you to the right starting point with one "
+                "clarifying question. The 50+ underlying tools are "
+                "the implementation detail; you don't browse them.",
+                "",
+            ]
+
+            # If the user really wants the full inventory (advanced),
+            # surface it as an appendix grouped by domain. Most users
+            # never read past the use-case table above.
             domains = {
-                "Server / Updates": ["list_capabilities", "update_elm_mcp", "connect_to_elm"],
+                "Server / Diagnostics": [
+                    "connect_to_elm", "elm_mcp_health", "list_capabilities",
+                    "update_elm_mcp",
+                ],
                 "DNG — Read": [
                     "list_projects", "get_modules", "get_module_requirements",
                     "search_requirements", "get_artifact_types", "get_link_types",
-                    "get_attribute_definitions", "list_baselines", "compare_baselines",
-                    "save_requirements", "extract_pdf",
+                    "get_attribute_definitions", "list_baselines",
+                    "compare_baselines", "extract_pdf", "find_folder",
+                    "resolve_requirement_id",
                 ],
                 "DNG — Write": [
                     "create_module", "create_requirements", "update_requirement",
-                    "update_requirement_attributes", "create_link", "create_baseline",
+                    "update_requirement_attributes", "create_link",
+                    "create_baseline", "add_to_module", "create_folder",
                 ],
-                "EWM (Work Items + Defects)": [
-                    "create_task", "create_defect", "update_work_item",
-                    "transition_work_item", "query_work_items",
+                "EWM (Work Items)": [
+                    "query_work_items", "get_ewm_workitem_types",
+                    "get_workflow_states", "create_task", "create_defect",
+                    "update_work_item", "transition_work_item",
+                    "link_workitem_to_external_url",
                 ],
                 "ETM (Test Management)": [
-                    "create_test_case", "create_test_script", "create_test_result",
+                    "list_test_cases", "list_test_plans",
+                    "list_test_execution_records", "create_test_case",
+                    "create_test_script", "create_test_result",
+                    "create_test_plan", "create_test_execution_record",
                 ],
                 "GCM (Global Configuration)": [
                     "list_global_configurations", "list_global_components",
                     "get_global_config_details",
                 ],
-                "EWM SCM (Code / Reviews)": [
-                    "scm_list_projects", "scm_list_changesets", "scm_get_changeset",
-                    "scm_get_workitem_changesets", "review_get", "review_list_open",
+                "Jazz SCM + Code Reviews": [
+                    "scm_list_projects", "scm_list_changesets",
+                    "scm_get_changeset", "scm_get_workitem_changesets",
+                    "review_get", "review_list_open",
+                ],
+                "User Resolution": ["resolve_user"],
+                "Build orchestration": [
+                    "build_new_project", "build_from_existing",
+                    "build_project_next", "build_project_status",
+                    "build_project_resume", "generate_traceability_matrix",
+                    "publish_build_state_to_dng",
+                ],
+                "Team coordination": [
+                    "wrap_up_session", "get_team_actions",
                 ],
                 "Visualization": ["generate_chart"],
             }
-            tool_descs = {t.name: (t.description or "").split(".")[0].strip() + "." for t in tools}
-            lines = [
-                f"# ELM MCP — what I can do (v{__version__})\n",
-                f"**{len(tools)} tools across {len(domains)} domains.** "
-                "Tools subject to the Generation Discipline (interview → preview → "
-                "confirm) are marked with ⚠️.\n",
-            ]
+
+            tool_descs = {
+                t.name: (t.description or "").split(".")[0].strip() + "."
+                for t in tools
+            }
             write_tools = {
                 "create_module", "create_requirements", "update_requirement",
-                "update_requirement_attributes", "create_link", "create_baseline",
+                "update_requirement_attributes", "create_link",
+                "create_baseline", "add_to_module", "create_folder",
                 "create_task", "create_defect", "update_work_item",
-                "transition_work_item", "create_test_case", "create_test_script",
-                "create_test_result", "generate_chart",
+                "transition_work_item", "link_workitem_to_external_url",
+                "create_test_case", "create_test_script",
+                "create_test_result", "create_test_plan",
+                "create_test_execution_record", "generate_chart",
+                "publish_build_state_to_dng",
             }
+
+            lines.append("---")
+            lines.append("")
+            lines.append("## Full tool inventory (appendix)")
+            lines.append("")
+            lines.append(
+                "_If you're an LLM looking at this: you DON'T need to "
+                "read this section to do useful work. Use the table "
+                "above to find your starting point. This appendix is "
+                "for completeness only. ⚠️ marks tools that ALWAYS "
+                "preview-and-confirm before firing._"
+            )
+            lines.append("")
+
             seen = set()
             for domain, names_in_domain in domains.items():
-                lines.append(f"\n## {domain}\n")
-                for n in names_in_domain:
-                    if n not in tool_descs:
-                        continue
+                names_present = [n for n in names_in_domain if n in tool_names]
+                if not names_present:
+                    continue
+                lines.append(f"### {domain}")
+                for n in names_present:
                     seen.add(n)
                     marker = " ⚠️" if n in write_tools else ""
-                    lines.append(f"- **`{n}`**{marker} — {tool_descs[n]}")
-            uncategorized = [t.name for t in tools if t.name not in seen]
+                    lines.append(
+                        f"- **`{n}`**{marker} — "
+                        f"{tool_descs.get(n, 'no description')}"
+                    )
+                lines.append("")
+
+            uncategorized = [n for n in tool_names if n not in seen]
             if uncategorized:
-                lines.append("\n## Other (uncategorized — likely added recently)\n")
+                lines.append("### Other (recent additions)")
                 for n in uncategorized:
-                    lines.append(f"- **`{n}`** — {tool_descs[n]}")
-            lines.append(
-                "\n---\n"
-                "**Quick start:** `connect_to_elm` → `list_projects` → "
-                "pick a workflow (read existing reqs / generate new ones / "
-                "import PDF / create EWM tasks / create ETM tests / full "
-                "lifecycle / tiered Business→Stakeholder→System decomposition).\n\n"
-                "**Read-only tools run freely; write tools always show a "
-                "preview and ask for your approval before firing.**"
-            )
+                    lines.append(
+                        f"- **`{n}`** — {tool_descs.get(n, 'no description')}"
+                    )
+                lines.append("")
+
             return [TextContent(type="text", text="\n".join(lines))]
 
         if name == "update_elm_mcp":
@@ -5356,43 +5305,8 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(lines))]
 
         # ── save_requirements ─────────────────────────────────
-        elif name == "save_requirements":
-            if not _last_requirements:
-                return [TextContent(type="text", text=(
-                    "No requirements to save. "
-                    "Use get_module_requirements first to fetch requirements."
-                ))]
+        # save_requirements handler removed in v0.5.0
 
-            fmt = arguments.get("format", "json")
-            filename = arguments.get("filename", "")
-
-            if not filename:
-                safe_name = "".join(
-                    c if c.isalnum() or c in ('_', '-') else '_'
-                    for c in _last_module_name
-                )[:50]
-                ext = {'json': '.json', 'csv': '.csv', 'markdown': '.md'}.get(fmt, '.json')
-                filename = f"requirements_{safe_name}{ext}"
-
-            filepath = os.path.join(os.getcwd(), filename)
-
-            if fmt == 'json':
-                client.export_to_json(_last_requirements, filepath)
-            elif fmt == 'csv':
-                client.export_to_csv(_last_requirements, filepath)
-            elif fmt == 'markdown':
-                client.export_to_markdown(_last_requirements, filepath)
-            else:
-                return [TextContent(type="text", text=(
-                    f"Unknown format: '{fmt}'. Use json, csv, or markdown."
-                ))]
-
-            return [TextContent(type="text", text=(
-                f"Saved **{len(_last_requirements)}** requirements to `{filename}`\n\n"
-                f"- Format: {fmt}\n"
-                f"- Module: {_last_module_name}\n"
-                f"- Project: {_last_project_name}"
-            ))]
 
         # ── search_requirements ────────────────────────────────
         elif name == "search_requirements":
@@ -6925,7 +6839,7 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
 # ── Main ──────────────────────────────────────────────────────
 
 async def main():
-    logger.info(f"IBM ELM MCP Server v{__version__} starting (62 tools, 9 prompts, 3 resource templates)")
+    logger.info(f"IBM ELM MCP Server v{__version__} starting (60 tools, 9 prompts, 3 resource templates)")
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
