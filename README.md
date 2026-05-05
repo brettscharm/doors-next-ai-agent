@@ -1,335 +1,197 @@
-# ELM MCP
+# ELM MCP — talk to IBM ELM from Bob
 
-**An MCP server that lets AI assistants drive IBM Engineering Lifecycle Management (ELM) — DOORS Next, EWM, ETM, GCM, and SCM/code-review — through standard OSLC and Reportable REST APIs.**
+> **Stop clicking around DOORS Next. Just tell Bob what you want.**
+>
+> *"Bob, build me a tracking service end-to-end with requirements, tasks, and tests in ELM."*
+> *"Bob, import this Jira epic PDF into DNG."*
+> *"Bob, what's the team been doing this week?"*
 
-> ## ⚠️ This is a personal passion project. NOT created, endorsed, supported, or distributed by IBM or the ELM development team.
->
-> **Use entirely at your own risk.** Built by Brett Scharmett on personal time for community / demo use.
-> No warranty. No SLAs. No IBM backing. Things can and will break — file issues, send PRs, or just don't use it.
->
-> *IBM, DOORS Next, ELM, EWM, ETM, Engineering Workflow Management, Engineering Test Management, and Jazz are trademarks of International Business Machines Corp. This project is independently developed against IBM's public OSLC / Reportable REST APIs.*
+> ⚠️ Personal passion project. **NOT** an official IBM tool. Use at your own risk. IBM, DOORS Next, ELM, EWM, ETM are trademarks of IBM Corp.
 
 ---
 
-## What it does
+## Set up Bob in 3 steps (30 seconds)
 
-**40 MCP tools, 5 workflow prompts, 3 resource templates** — read and write across the full ELM stack from any MCP-speaking AI assistant (IBM Bob, Claude Code, VS Code Copilot, Cursor, Windsurf, custom agents). Headline workflow: **`/build-project <one-line idea>`** generates Business → Stakeholder → System requirements (in modules), implementation tasks, test cases — all linked, with explicit user-approval gates between each phase — then writes the actual code based on the finalized ELM artifacts.
+You need: a Mac/Linux machine, Python 3.9+, and an ELM account.
 
-| Domain | Read | Write | Query / Workflow |
-|---|---|---|---|
-| **DNG** (Requirements) | List projects, modules, requirements, artifact types, link types, attribute definitions, baselines | Create requirements (with rich Markdown / XHTML / tables / images), create modules, create folders, update title/content, **update arbitrary attributes** (Status, Priority, etc.), create baselines | Search, compare baselines, **create links** between any two existing artifacts |
-| **EWM** (Work Items) | List projects | Create Tasks, **create Defects** (with Filed Against resolution) | **Update work items**, **transition workflow states** (New → In Progress → Resolved → Closed), **query work items** with `oslc.where` filters |
-| **ETM** (Test) | List projects | Create test cases, create test results | — |
-| **GCM** (Global Config) | List configs, list components, get config details | — | — |
-| **SCM** (Code) | List SCM projects, list change sets, get change set + linked work items, get code review record | — | Reverse-lookup: get change sets for a work item |
-| **Other** | Extract PDF (for re-import), generate charts (PNG) | — | — |
+### Step 1 — install
 
-The MCP server itself does **zero AI generation** — every tool is a deterministic API call against ELM. The intelligence (writing requirements, parsing PDFs, picking chart types, choosing tools) comes from whichever AI assistant you connect.
-
----
-
-## Quick Start
-
-You need: Python 3.9+, git, an ELM account, and an AI assistant that speaks MCP (IBM Bob, Claude Code, Cursor, VS Code with Copilot, Windsurf, etc.).
-
-### Recommended: one-line install (works for IBM Bob and every other host)
-
-Open a terminal and run:
+Open Terminal. Paste this. Hit Enter.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/brettscharm/elm-mcp/main/install.sh | bash
 ```
 
 That command:
-1. Clones the repo to `~/.elm-mcp`
-2. Installs Python dependencies
-3. **Writes the correct MCP config to every AI host it detects** — including IBM Bob (`~/.bob/mcp_settings.json` + `.bob/mcp.json`), Claude Code, Cursor, VS Code, Windsurf
-4. Prompts for your ELM credentials (`ELM_URL`, `ELM_USERNAME`, `ELM_PASSWORD`)
-5. Launches the MCP server as a subprocess and verifies the handshake + 40-tool registration end-to-end
+- Downloads ELM MCP to `~/.elm-mcp`
+- Asks you for your ELM URL, username, password (typed at the prompt — never sent anywhere except your own machine)
+- Writes Bob's MCP config automatically (`~/.bob/mcp_settings.json`)
+- Verifies the whole thing works end-to-end
 
-After it finishes, **restart your AI assistant** (full quit, not just close window). Then say:
+### Step 2 — fully quit + reopen Bob
+
+**Cmd + Q in Bob, then reopen.** Bob only loads MCP servers at startup; you have to actually quit, not just close the window.
+
+### Step 3 — say hi
+
+In any Bob chat, type:
 
 > *"Connect to ELM and list my projects."*
 
-Updates: re-run the same `curl ... | bash` command, or just talk to the AI: *"update yourself."* The server also auto-checks GitHub once a day on startup and silently pulls new versions.
+Bob should respond with your DNG projects. **You're done.** Try one of these next:
 
-### Alternative — manual clone (for air-gapped / restricted environments)
+- *"Build me a temperature converter web app end-to-end."*
+- *"Show me what's in the [Module Name] module."*
+- *"What can you do?"* (Bob calls `list_capabilities` and shows you the menu)
 
-If you can't `curl | bash`:
+---
+
+## Common things you'll ask Bob
+
+| You say | What Bob does |
+|---|---|
+| *"build me a [thing]"* | Full agentic flow: requirements → tasks → tests → review pause → code |
+| *"import this Jira epic [paste text or PDF path]"* | Parses the epic into ELM artifacts (epic + reqs + tests + cross-links) |
+| *"show me the reqs in [module]"* | Reads the module from DNG, summarizes |
+| *"what's the team doing?"* | Reads the BOB Team Actions module, summarizes who did what |
+| *"resume my last build"* | Picks up an in-progress build run from where you left off |
+| *"I'm done for today"* | Wraps up your session with a final entry teammates can read |
+| *"update yourself"* | Pulls the latest version of ELM MCP from GitHub |
+| *"are you connected? what version?"* | Self-diagnoses connection state, version, active runs |
+
+You don't have to memorize these. Bob figures it out from natural language. If you're not sure what to do, just type **`/getting-started`** and Bob asks one question to point you at the right starting point.
+
+---
+
+## When something goes wrong
+
+**Bob can't see ELM MCP after install:**
+1. Did you fully quit Bob (Cmd+Q) and reopen?
+2. Run `python3 ~/.elm-mcp/setup.py --diagnose` — it tells you what's wrong in plain English
+
+**Bob asks for approval on every single action:**
+- Re-run `python3 ~/.elm-mcp/setup.py` — refreshes Bob's allow-list with the current set of safe-to-auto-approve tools
+- Quit + reopen Bob
+
+**Module binding fails ("requirements created but not in module"):**
+- Your DNG project doesn't have configuration management enabled
+- Either ask your DNG admin to enable it, or open the module in DNG and drag the requirements in manually
+- Then tell Bob *"continue"* and the build flow picks back up
+
+**Anything else:**
+- Tell Bob *"run elm_mcp_health"* — it'll dump connection state, version, last update check, etc.
+- Or open an issue: https://github.com/brettscharm/elm-mcp/issues
+
+---
+
+## To update
+
+The simplest way: **say *"update yourself"* in any Bob chat.** That's a single tool call — Bob pulls the latest from GitHub and tells you to restart.
+
+Or in terminal:
 
 ```bash
-git clone https://github.com/brettscharm/elm-mcp.git
-cd elm-mcp
+curl -fsSL https://raw.githubusercontent.com/brettscharm/elm-mcp/main/install.sh | bash
+```
+
+(Same command as install — re-running it just updates.)
+
+---
+
+## What it actually does (for the curious)
+
+ELM MCP is a Model Context Protocol server. It exposes IBM Engineering Lifecycle Management — DNG (requirements), EWM (work items / tasks / defects), ETM (test management), GCM (global config), and SCM/code-review — as **62 tools and 10 prompts** that any MCP-speaking AI assistant can call. Bob is one such assistant; Claude Code, Cursor, Windsurf are others.
+
+The MCP itself does **zero AI generation**. Every tool is a deterministic API call against ELM. The intelligence — writing requirements, parsing PDFs, picking the right module — comes from whichever AI you connect.
+
+The headline workflow is **`/build-new-project`**:
+1. You give Bob a one-line idea
+2. Bob interviews you (5 min)
+3. Bob proposes requirements; you approve
+4. Bob proposes tasks; you approve
+5. Bob proposes test cases; you approve
+6. **STOP** — you review everything in DNG/EWM/ETM
+7. Bob re-pulls current state, writes the actual app code with `# Implements: REQ-005` headers tying every file to the requirement
+8. Bob marks tasks resolved, records test results in ETM as it goes
+9. Final summary: traceability matrix, all URLs clickable
+
+Every phase has an explicit user-approval gate. Bob can't blast through to writing code without your sign-off at each step.
+
+---
+
+## Bring your own AI assistant
+
+Same server works against any MCP-speaking host. `install.sh` writes the right config for every host it detects:
+
+| AI Assistant | Config file written |
+|---|---|
+| **IBM Bob** | `~/.bob/mcp_settings.json` (global) + `<project>/.bob/mcp.json` (project-local) |
+| **Claude Code** | `~/.claude.json` (global) + `.mcp.json` (project) |
+| **VS Code Copilot** | `.vscode/mcp.json` |
+| **Cursor** | `~/.cursor/mcp.json` |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+
+---
+
+## Manual install (only if `curl | bash` doesn't fit your security policy)
+
+```bash
+git clone https://github.com/brettscharm/elm-mcp.git ~/.elm-mcp
+cd ~/.elm-mcp
 python3 setup.py
 ```
 
-`setup.py` does everything `install.sh` does except the clone. Idempotent — re-run any time.
+Same outcome, just two more steps.
 
-### Verify it works any time
-
-```bash
-python3 setup.py --diagnose
-```
-
-Skips installation and config writes. Just:
-1. Confirms the current Python can import every dependency
-2. Launches `doors_mcp_server.py` as a subprocess, runs the MCP `initialize` handshake, calls `tools/list`, asserts ≥1 tool registered
-3. Optionally exercises ELM auth if `.env` has credentials
-
-Use this when something feels off — server "not found" in your IDE, password rotated, Python upgraded, etc.
+For air-gapped / locked-down environments where automatic config-write doesn't work, run `python3 ~/.elm-mcp/setup.py --print-config`. It outputs the JSON ready to paste manually into Bob's `~/.bob/mcp_settings.json` with absolute paths pre-filled for your machine.
 
 ---
 
-## For IBM Bob users — the manual JSON path
+## Privacy + credentials
 
-`install.sh` and `setup.py` write Bob's config for you automatically. **You usually don't need to do this manually.** But if Bob's MCP integration isn't picking up the auto-generated config (some Bob versions in some IT environments lock down auto-write), you have two options.
-
-### Option A — one command prints the JSON, you paste it
-
-```bash
-python3 ~/.elm-mcp/setup.py --print-config
-```
-
-(Or `python3 setup.py --print-config` if you cloned manually.)
-
-That command prints a fully-resolved JSON block — Python path and server path filled in for **your** machine — ready to paste into `~/.bob/mcp_settings.json`. No manual `which python3` / `ls` ceremony. The same JSON works for Cursor / Windsurf / Claude Code (paste targets are listed in the command's output).
-
-### Option B — build the JSON by hand
-
-**Step 1 — figure out two paths on your machine:**
-
-```bash
-which python3
-# → e.g. /opt/anaconda3/bin/python3   ← absolute path to YOUR Python
-
-ls ~/.elm-mcp/doors_mcp_server.py
-# → /Users/<you>/.elm-mcp/doors_mcp_server.py   ← absolute path to the server script
-```
-
-**Step 2 — open Bob's MCP config file** (create if missing):
-
-- **Global (covers every project):** `~/.bob/mcp_settings.json`
-- **Project-local (covers just this repo):** `<your-project>/.bob/mcp.json`
-
-Either works. Global is recommended unless your team needs the entry version-controlled with the project.
-
-**Step 3 — paste this in, replacing the two paths from step 1:**
-
-```json
-{
-  "mcpServers": {
-    "doors-next": {
-      "command": "<absolute path to python3 from step 1>",
-      "args": [
-        "<absolute path to doors_mcp_server.py from step 1>"
-      ],
-      "alwaysAllow": [
-        "connect_to_elm", "list_projects", "get_modules",
-        "get_module_requirements", "search_requirements",
-        "get_artifact_types", "get_link_types",
-        "get_attribute_definitions", "list_baselines",
-        "compare_baselines", "extract_pdf",
-        "list_global_configurations", "list_global_components",
-        "get_global_config_details", "query_work_items",
-        "scm_list_projects", "scm_list_changesets",
-        "scm_get_changeset", "scm_get_workitem_changesets",
-        "review_get", "review_list_open", "generate_chart",
-        "save_requirements", "list_capabilities"
-      ]
-    }
-  }
-}
-```
-
-**Step 4 — make sure your ELM credentials exist** at `~/.elm-mcp/.env` (or wherever your clone lives):
-
-```
-ELM_URL=https://your-elm-server.com
-ELM_USERNAME=your_username
-ELM_PASSWORD=your_password
-```
-
-`install.sh` and `setup.py` create this for you. To do it manually, copy `.env.example` → `.env` and fill in values.
-
-**Step 5 — fully quit Bob (Cmd+Q), reopen it, and say:**
-
-> *"List the MCP tools you have available."*
-
-Bob should enumerate 40 tools including `connect_to_elm`, `create_module`, `create_requirements`, `build_project`, etc. If it does, you're done — say *"connect to ELM and list my projects."*
-
-### What `alwaysAllow` does (Bob-specific)
-
-Each tool name in `alwaysAllow` is **pre-approved by you** — Bob runs it without asking permission per-call. The list above only includes **read-only tools** (list, get, query, search, etc.) plus chart rendering. Writes (`create_*`, `update_*`, `transition_*`, `create_link`, `create_baseline`) deliberately are NOT in the list, so Bob always asks before modifying anything in ELM.
-
-If you want even tighter control, remove tools from `alwaysAllow`. If you want zero pauses (e.g. building a demo where you don't want to keep clicking Approve), add the write tools too — but that's at your own risk.
+- ELM password lives ONLY in `~/.elm-mcp/.env` on your machine
+- That file is gitignored; it's never committed
+- The MCP authenticates directly with your ELM server using your account; no third-party services involved
+- Re-enter credentials anytime by deleting `.env` and re-running `setup.py`
 
 ---
 
-## Bring your own LLM
+## File layout (if you want to inspect the code)
 
-This repo is the **hands**, not the brain. Same server works against any MCP-speaking host:
-
-| AI Assistant | Config file `install.sh` / `setup.py` writes | Doc reference |
-|---|---|---|
-| **IBM Bob** | `~/.bob/mcp_settings.json` (user) + `.bob/mcp.json` (project) | https://bob.ibm.com/docs/ide/configuration/mcp/mcp-in-bob |
-| **Claude Code** | `~/.claude.json` (user) + `.mcp.json` (project) | https://code.claude.com/docs/en/mcp |
-| **VS Code** (Copilot) | `.vscode/mcp.json` (workspace) | https://code.visualstudio.com/docs/copilot/customization/mcp-servers |
-| **Cursor** | `.cursor/mcp.json` (workspace) + `~/.cursor/mcp.json` (user) | https://cursor.com/docs/context/mcp |
-| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | https://docs.windsurf.com/windsurf/cascade/mcp |
-
-`install.sh` writes to every host it detects in one run.
-
-> **Smithery note:** ELM MCP is also published at `brettscharmett/elm-mcp` on Smithery, but Smithery's CLI does NOT yet support IBM Bob (Bob isn't in their `--client` list). For Bob users, use `install.sh` above. Smithery is useful for non-Bob hosts: `smithery install brettscharmett/elm-mcp`.
+```
+~/.elm-mcp/
+├── setup.py                  # Installer (this is what install.sh runs)
+├── doors_mcp_server.py       # The MCP server itself (62 tools)
+├── doors_client.py           # ELM REST client (DNG + EWM + ETM + GCM + SCM)
+├── BOB.md                    # Instructions Bob reads automatically
+├── README.md                 # This file
+├── .env                      # YOUR credentials (gitignored, local only)
+└── probe/                    # Live-server probes + research notes
+```
 
 ---
 
-## Credentials
+## Help / issues / contributing
 
-`setup.py` walks you through it. Under the hood it writes a local `.env`:
+- Issues: https://github.com/brettscharm/elm-mcp/issues
+- Email: brett.scharmett@ibm.com (personal capacity, not IBM support)
 
-```
-ELM_URL=https://your-elm-server.com
-ELM_USERNAME=your_username
-ELM_PASSWORD=your_password
-```
-
-One login covers all five ELM domains — DNG, EWM, ETM, GCM, SCM. The URL field accepts any of `https://server`, `https://server/rm`, `https://server/ccm`, `https://server/jts` etc.; the client strips the domain suffix and re-attaches the right path per call.
-
-`.env` is gitignored. The server handles **Basic Auth and Form-Based Auth (`j_security_check`)** automatically and falls back to disabled SSL verification for self-signed certs — you don't need to know which one your server uses.
-
-> **Legacy compat:** older `.env` files using `DOORS_URL` / `DOORS_USERNAME` / `DOORS_PASSWORD` still work. The new `ELM_*` names take precedence when both are set. No migration required — but if you regenerate `.env` via `setup.py` it'll write the new names.
-
-To re-enter credentials later, delete `.env` and re-run `setup.py`.
-
----
-
-## The proper development flow
-
-This is what good engineering looks like with ELM, and what the AI should follow. **Each phase has a user-approval gate** — the AI shouldn't blast through all four without checking in.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ PHASE 1 — REQUIREMENTS  (DNG)                               │
-│ AI generates atomic "shall" statements. Organized in a      │
-│ module. IEEE 29148 / INCOSE compliant: atomic, verifiable,  │
-│ unambiguous. Status starts at "Proposed".                   │
-│ ─→ AI STOPS. "Review these. Approve to continue?"           │
-└─────────────────────────────────────────────────────────────┘
-                             ↓ user approves
-┌─────────────────────────────────────────────────────────────┐
-│ PHASE 2 — IMPLEMENTATION TASKS  (EWM)   only if user wants  │
-│ One Task per requirement. Linked via                        │
-│ calm:implementsRequirement. Owner / iteration / estimate    │
-│ default unset.                                              │
-│ ─→ "Want me to create test cases too?"                      │
-└─────────────────────────────────────────────────────────────┘
-                             ↓ user approves
-┌─────────────────────────────────────────────────────────────┐
-│ PHASE 3 — TEST CASES  (ETM)             only if user wants  │
-│ One Test Case per requirement. Linked via                   │
-│ oslc_qm:validatesRequirement. Test steps, expected results, │
-│ pass/fail conditions live HERE — not inside the requirement.│
-└─────────────────────────────────────────────────────────────┘
-                             ↓ post-implementation
-┌─────────────────────────────────────────────────────────────┐
-│ PHASE 4 — DEFECTS  (EWM)                when tests fail     │
-│ Failing test result triggers a Defect (with proper          │
-│ Filed Against resolution). Linked back to test result and   │
-│ original requirement. Transitioned through workflow.        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-What the AI **will not** do automatically:
-- Push past Phase 1 without explicit user approval
-- Mark a requirement "Approved" — that's a human gate
-- Skip cross-domain links — every artifact traces back
-
-The full instructions the AI reads are in [BOB.md](BOB.md).
-
----
-
-## Rich text in requirements
-
-`create_requirements`'s `content` field accepts three input shapes (the AI picks whichever is easiest):
-
-1. **Raw XHTML** — for hand-built complex layouts. Pass-through when content starts with `<`. Must be valid XML — only the 5 XML entities (`&amp; &lt; &gt; &quot; &apos;`); use literal Unicode for everything else (`±`, `°`, etc.). Named HTML entities like `&plusmn;` will reject.
-2. **Markdown** — full Markdown including tables, images, headings, lists, links, bold/italic, code blocks. Auto-converted to XHTML.
-3. **Plain text** — paragraphs split on blank lines; lines starting with `- ` or `* ` become bulleted lists.
-
-DNG renders the result in `jazz_rm:primaryText` (the rich-text body), not `dcterms:description` (which is a short summary).
-
-**Image caveat:** DNG's CSP may block external image URLs. If your image doesn't render, upload it as a DNG attachment and reference the internal URL — or use a `data:` URI for small images.
-
----
-
-## Known limitations
-
-These are **server-side restrictions**, not bugs in this MCP:
-
-- **Some ELM features depend on server version / feature flags** — DNG glossary, link validity, certain GCM operations may return 404 on older deployments.
-- **Permissions vary per project** — `setup.py --diagnose` confirms auth works, but write permissions are project-scoped in DNG/EWM/ETM. If a write fails with 403, it's a permission grant in your DNG admin, not a code bug.
-- **Module binding works** through DNG's Module Structure API (`<module>/structure`, gated by the `DoorsRP-Request-Type: public 2.0` header). The legacy `oslc_rm:uses` PUT route is locked down on most servers — calls to it surface a `PHASE_GATE` error. The Structure API path is what `create_requirements` (with `module_name`) and `add_to_module` use; see [probe/MODULE_BINDING_FINDINGS.md](probe/MODULE_BINDING_FINDINGS.md) for the full investigation.
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `setup.py`: "No AI assistants detected" | Install one of Claude Code / VS Code / Cursor / Windsurf, then re-run. |
-| AI can't see the MCP server | Restart your IDE. Run `python3 setup.py --diagnose` to verify the server itself works independent of the IDE. |
-| Connection test fails | The error tells you what's wrong (bad password, unreachable server, cert issue). Fix the one thing and re-run. |
-| EWM/ETM/DNG creation fails with 403 | Your account needs Create permission in that project. Open the project's admin → Permissions and grant your role write access. |
-| Requirements created but Primary Text is empty | Older artifacts only — this was a bug fixed Apr 2026. New requirements use `jazz_rm:primaryText` correctly. Re-run with the AI to recreate. |
-| "Module created but requirements aren't in it" | Pass `module_name` to `create_requirements` so they auto-bind on creation, or call `add_to_module(module_url, [req_urls])` after the fact. Both use the DNG Structure API under the hood. |
-| Charts don't render in chat | Make sure your AI tool can display markdown images. Worst case, open the file directly — paths are printed. |
-
----
-
-## Project structure
-
-```
-elm-mcp/
-├── setup.py               # One-command installer + --diagnose flag
-├── doors_mcp_server.py    # MCP server (40 tools, 5 prompts, 3 resources)
-├── doors_client.py        # ELM REST client (DNG + EWM + ETM + GCM + SCM)
-├── BOB.md                 # Instructions the AI reads automatically
-├── CLAUDE.md              # Pointer to BOB.md for Claude Code
-├── LIFECYCLE.md           # Full requirements-to-test lifecycle reference
-├── README.md              # This file
-├── requirements.txt       # Python dependencies
-├── .env.example           # Credential template (copied to .env by setup)
-├── .mcp.json              # Project-local Claude Code MCP entry (gen by setup)
-├── charts/                # Generated PNGs (gitignored)
-└── probe/                 # Live-server probes + research reports
-    ├── OSLC_GAPS.md       # Tool gap analysis
-    ├── SCM_RESEARCH.md    # SCM + code review research
-    └── MODULE_BINDING_FINDINGS.md  # Why module-binding is locked down
-```
+PRs welcome. The probes in `probe/` document the live ELM API surface; new tools should follow the patterns in `doors_client.py` (GET-with-ETag → modify → PUT-with-If-Match for updates; service-provider-discovery → POST to creation factory for creates).
 
 ---
 
 ## Share with your team
 
-Copy-paste-ready blurb for Slack, email, or Teams:
+Copy-paste-ready blurb:
 
-> 🤖 **ELM MCP** — drive IBM DOORS Next, EWM, and ETM from any AI assistant (IBM Bob, Claude Code, Cursor, etc.) instead of clicking around the web UI.
+> 🤖 **ELM MCP** — drive IBM DOORS Next, EWM, and ETM from Bob (or any AI assistant) instead of clicking around the web UI.
 >
-> Install in 30 seconds — open a terminal:
+> Install in 30 seconds:
 > ```
 > curl -fsSL https://raw.githubusercontent.com/brettscharm/elm-mcp/main/install.sh | bash
 > ```
-> Restart your AI assistant, then ask it: *"Connect to ELM and list my projects."*
+> Restart Bob. Say *"connect to ELM and list my projects."*
 >
-> 40 tools: read/write requirements (with rich text + tables + images), create modules with auto-bound requirements, transition work items, query and update across DNG/EWM/ETM, generate charts — plus a one-line `/build-project` workflow that takes you from idea → tiered requirements → tasks → tests → code with phase-gated user approvals. Full details: https://github.com/brettscharm/elm-mcp
+> 62 tools, 10 prompts. Read/write requirements (rich text + tables + images), build full projects end-to-end with traceable code, import Jira epics, see what your team's been up to. Full details: https://github.com/brettscharm/elm-mcp
 >
-> ⚠️ Personal passion project — NOT an official IBM tool. Use at your own risk. Free for community use.
-
----
-
-## Contributing / Issues
-
-- GitHub issues: https://github.com/brettscharm/elm-mcp/issues
-- Email: brett.scharmett@ibm.com  *(personal capacity — not IBM support)*
-
-PRs welcome. The probes in `probe/` document everything we've learned about the live ELM API surface; new tools should follow the patterns in `doors_client.py` (GET-with-ETag → modify → PUT-with-If-Match for updates; service-provider-discovery → POST to creation factory for creates) and add a one-line live-test entry to `probe/A_C_LIVE_TESTS.txt` if exercising new endpoints.
+> ⚠️ Personal passion project — NOT an official IBM tool.
