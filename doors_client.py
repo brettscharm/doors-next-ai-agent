@@ -10,6 +10,7 @@ import os
 import re
 import csv
 import json
+import sys
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
@@ -1419,45 +1420,73 @@ class DOORSNextClient:
                         'module_url': module_url}
             comp_match = re.search(
                 r'oslc_config:component\s+rdf:resource="([^"]+)"', mod_resp.text)
-            if not comp_match:
-                # NON-GCM project — fall through to the legacy oslc_rm:uses path
-                fallback = self._add_to_module_legacy(module_url, requirement_urls,
-                                                       initial_rdf=mod_resp.text)
-                if fallback and 'error' not in fallback:
-                    fallback['method'] = 'legacy_oslc_rm_uses'
-                    return fallback
-                # Both paths failed — return the legacy error so the
-                # caller knows it's a no-programmatic-binding server
-                fb_err = (fallback.get('error', 'unknown')
-                          if fallback else 'unknown')
-                return {
-                    'error': (f'This DNG project does not support '
-                              f'programmatic module binding. Modern '
-                              f'Structure API requires configuration '
-                              f'management (which is not enabled), and '
-                              f'the legacy oslc_rm:uses path also failed: '
-                              f'{fb_err}. To bind these requirements, '
-                              f'either (a) ask your DNG admin to enable '
-                              f'configuration management on the project, '
-                              f'or (b) drag the artifacts into the module '
-                              f'manually in the DNG UI.'),
-                    'module_url': module_url,
-                }
-            component_url = comp_match.group(1)
+            component_url = comp_match.group(1) if comp_match else ''
 
-            cfg_resp = self.session.get(
-                f"{component_url}/configurations",
-                headers={'Accept': 'application/rdf+xml'},
-                timeout=self._TIMEOUT,
-            )
-            stream_match = re.search(
-                r'rdfs:member\s+rdf:resource="([^"]+)"', cfg_resp.text)
-            if not stream_match:
-                return {'error': 'Could not discover active GCM stream for this component',
-                        'module_url': module_url}
-            stream_url = stream_match.group(1)
+            # OPT-OUT project handling (v0.5.6 fix): when the module RDF
+            # doesn't have oslc_config:component directly (because the
+            # project has CM disabled / "opt-out"), the IBM
+            # ELM-Python-Client discovers the project's auto-created
+            # default component + "Initial Stream" via a different
+            # path — see the user-shared finding from their
+            # ELM-Python-Client deep-dive. The Structure API still
+            # works on opt-out projects, you just have to find the
+            # synthetic stream a different way.
+            if not component_url:
+                project_url_for_lookup = self._derive_project_url_from_module(
+                    mod_resp.text, module_url)
+                synthetic = self._discover_default_component_and_stream(
+                    project_url_for_lookup)
+                if synthetic:
+                    component_url, stream_url = synthetic
+                    sys.stderr.write(
+                        f"[elm-mcp] add_to_module: opt-out project "
+                        f"detected; using default component+stream "
+                        f"({component_url}, {stream_url})\n"
+                    ) if False else None  # noqa — quiet by default
+                else:
+                    # Synthesize discovery failed too — try the legacy path
+                    # before giving up.
+                    fallback = self._add_to_module_legacy(
+                        module_url, requirement_urls,
+                        initial_rdf=mod_resp.text)
+                    if fallback and 'error' not in fallback:
+                        fallback['method'] = 'legacy_oslc_rm_uses'
+                        return fallback
+                    fb_err = (fallback.get('error', 'unknown')
+                              if fallback else 'unknown')
+                    return {
+                        'error': (
+                            f'This DNG project does not support '
+                            f'programmatic module binding. Tried THREE '
+                            f'paths: (1) Structure API with module-level '
+                            f'oslc_config:component (no component on the '
+                            f'module RDF — likely an opt-out project); '
+                            f'(2) Structure API with project-derived '
+                            f'default component (could not discover one); '
+                            f'(3) legacy oslc_rm:uses PUT (also failed: '
+                            f'{fb_err}). Either (a) ask your DNG admin to '
+                            f'enable configuration management on the '
+                            f'project, or (b) drag the artifacts into the '
+                            f'module manually in the DNG UI.'),
+                        'module_url': module_url,
+                    }
+            else:
+                # Module RDF had a component reference — use that to find
+                # the active stream the standard way.
+                cfg_resp = self.session.get(
+                    f"{component_url}/configurations",
+                    headers={'Accept': 'application/rdf+xml'},
+                    timeout=self._TIMEOUT,
+                )
+                stream_match = re.search(
+                    r'rdfs:member\s+rdf:resource="([^"]+)"', cfg_resp.text)
+                if not stream_match:
+                    return {'error': 'Could not discover active stream for this component',
+                            'module_url': module_url}
+                stream_url = stream_match.group(1)
         except Exception as e:
-            return {'error': f'GCM discovery failed: {e}', 'module_url': module_url}
+            return {'error': f'Component/stream discovery failed: {e}',
+                    'module_url': module_url}
 
         struct_headers = {
             'Accept': 'application/rdf+xml',
@@ -1690,6 +1719,113 @@ class DOORSNextClient:
                 if about:
                     return about
             return None
+        except Exception:
+            return None
+
+    def _derive_project_url_from_module(self, module_rdf: str,
+                                         module_url: str) -> str:
+        """From a module's RDF, extract the URL of the DNG project that
+        owns it. Tries process:projectArea first, then falls back to
+        the URL pattern (modules live under .../resources/MD_*).
+        Used by opt-out-project component discovery."""
+        try:
+            pa_match = re.search(
+                r'process:projectArea\s+rdf:resource="([^"]+)"',
+                module_rdf,
+            )
+            if pa_match:
+                pa_url = pa_match.group(1)
+                # process:projectArea usually points at /process/project-areas/<id>
+                # We need the /rm services URL or /rm-projects/<id> for components
+                # discovery. Convert /process/project-areas/<id> →
+                # /rm/rm-projects/<id> (DNG's component-listing endpoint pattern).
+                pa_id_match = re.search(r'/project-areas/([^/?#]+)', pa_url)
+                if pa_id_match:
+                    return f"{self.base_url}/rm-projects/{pa_id_match.group(1)}"
+            # Fallback: try to find the rm-projects URL elsewhere in the RDF
+            rm_proj_match = re.search(
+                r'(https?://[^"]+/rm/rm-projects/[A-Za-z0-9_\-]+)',
+                module_rdf,
+            )
+            if rm_proj_match:
+                return rm_proj_match.group(1)
+        except Exception:
+            pass
+        return ''
+
+    def _discover_default_component_and_stream(
+            self, project_url: str) -> Optional[tuple]:
+        """For opt-out (CM-disabled) projects, DNG auto-creates a
+        single default component with a single 'Initial Stream'
+        configuration. The IBM ELM-Python-Client discovers these by
+        listing the project's components and picking the first one's
+        first configuration. Returns (component_url, stream_url) or
+        None if discovery fails (genuinely no programmatic-binding
+        path on this server)."""
+        if not project_url:
+            return None
+        try:
+            # Step 1: list the project's components.
+            # /rm/rm-projects/<id> → returns project metadata including
+            # an oslc_config:component link or a "components" feed.
+            resp = self.session.get(
+                project_url,
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return None
+            # The first component reference works for opt-out projects
+            # (they have exactly one). Pattern matches both direct
+            # component refs and component-collection refs.
+            comp_match = re.search(
+                r'oslc_config:component\s+rdf:resource="([^"]+)"',
+                resp.text,
+            )
+            if not comp_match:
+                # Try alternate patterns — older / newer DNG versions
+                # use slightly different predicates
+                comp_match = re.search(
+                    r'(https?://[^"]+/cm/component/[A-Za-z0-9_\-]+)',
+                    resp.text,
+                )
+                if not comp_match:
+                    return None
+            component_url = (comp_match.group(1)
+                             if comp_match.lastindex
+                             else comp_match.group(0))
+
+            # Step 2: list the component's configurations and pick
+            # the first stream (opt-out projects have one default).
+            cfg_resp = self.session.get(
+                f"{component_url}/configurations",
+                headers={
+                    'Accept': 'application/rdf+xml',
+                    'OSLC-Core-Version': '2.0',
+                },
+                timeout=self._TIMEOUT,
+            )
+            if cfg_resp.status_code != 200:
+                return None
+            # Look for a Stream or Configuration member first; fall
+            # back to any rdfs:member URL.
+            stream_match = re.search(
+                r'<oslc_config:Stream[^>]+rdf:about="([^"]+)"',
+                cfg_resp.text,
+            )
+            if not stream_match:
+                stream_match = re.search(
+                    r'rdfs:member\s+rdf:resource="([^"]+)"',
+                    cfg_resp.text,
+                )
+            if not stream_match:
+                return None
+            stream_url = stream_match.group(1)
+
+            return (component_url, stream_url)
         except Exception:
             return None
 
