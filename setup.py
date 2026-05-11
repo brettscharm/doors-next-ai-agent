@@ -865,6 +865,14 @@ def main() -> int:
     print(f"  {DIM}Re-print this config:    python3 setup.py --print-config{RESET}")
     print(f"  {DIM}Network timeout in Bob:  set to 120000 (2 min) so batch creates don't time out{RESET}")
     print()
+    print(f"  {BOLD}⚠️  Heads-up about DNG configuration management (CM){RESET}")
+    print(f"  {DIM}This MCP is built for CM-enabled DNG projects. Without CM:{RESET}")
+    print(f"  {DIM}  • You can still create requirements (in folders){RESET}")
+    print(f"  {DIM}  • You CANNOT bind reqs into modules programmatically (DNG limitation){RESET}")
+    print(f"  {DIM}  • Baselines, streams, and Phase 5/6 of /build-project won't work fully{RESET}")
+    print(f"  {DIM}If your project doesn't have CM, ask your DNG admin to enable it{RESET}")
+    print(f"  {DIM}(single project-level setting; non-destructive).{RESET}")
+    print()
     return 0
 
 

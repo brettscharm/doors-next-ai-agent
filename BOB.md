@@ -4,6 +4,24 @@
 
 This MCP server connects you to IBM Engineering Lifecycle Management (ELM) — DNG (requirements), EWM (work items), ETM (test management), GCM (global config), and SCM (code / change-sets / reviews). 62 tools + 10 prompts. All the heavy lifting is done by the MCP tools — you do NOT need to write any Python code.
 
+## 🛑 PROJECT REQUIREMENT: DNG configuration management must be enabled
+
+This MCP is built for **CM-enabled DNG projects**. Without CM, several core operations don't work — not because of bugs, but because the underlying DNG APIs don't exist on non-CM projects (verified against IBM's official ELM-Python-Client):
+
+| Operation | Non-CM behavior |
+|---|---|
+| Create requirements in a folder | ✅ Works |
+| Bind requirements into a module | ❌ No API path — reqs sit loose in folder |
+| Baseline at Phase 5 of `/build-project` | ❌ Not available |
+| Streams for parallel work | ❌ Not available |
+| Drift detection at Phase 6 | ⚠️ Degraded (timestamp-only) |
+
+**If you encounter module binding failures**, first check whether the project has CM. Sign: modules will lack `/cm/component/` paths in their URLs. Tell the user:
+
+> *"Module binding requires DNG configuration management (CM) on this project. This isn't a bug — IBM's API doesn't expose programmatic binding on non-CM projects (verified against their official Python client). Ask your DNG admin to enable CM (one project setting, doesn't break existing data). In the meantime, the reqs I created are in a folder — usable, but not in a navigable module document."*
+
+Don't keep retrying alternative bind paths once you've confirmed it's a non-CM project — the answer is server config, not code.
+
 ## COMMON TASKS — the user's intent → your starting point
 
 The MCP has 60+ tools but the user mostly invokes ~10 starting points. Find their intent in this table FIRST; only fall through to the full trigger-phrase routing below if nothing here fits.

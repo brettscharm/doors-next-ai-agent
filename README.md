@@ -14,6 +14,18 @@
 
 You need: a Mac/Linux machine, Python 3.9+, and an ELM account.
 
+> ### 🛑 Prerequisite: DNG configuration management (CM) must be enabled on your projects
+>
+> ELM MCP is built around the full DNG flow — modules, baselines, streams, traceability — which **all require IBM's configuration management (CM) feature** on the DNG project. Without CM:
+> - You can still create requirements (in folders)
+> - You **cannot** bind requirements into modules programmatically — there is no DNG API path for this on non-CM projects (verified against IBM's own ELM-Python-Client)
+> - You **cannot** baseline requirements at Phase 5 of `/build-project`
+> - You **cannot** use streams for parallel requirements work
+>
+> **If your DNG project doesn't have CM enabled:** ask your DNG admin to enable it (one project-level toggle in DNG admin; doesn't break existing data). Most enterprise ELM customers have CM on by default.
+>
+> **If you don't know whether CM is enabled:** ask Bob to connect and try `/build-new-project` — the flow tells you immediately if CM is missing on the target project.
+
 ### Step 1 — install
 
 Open Terminal. Paste this. Hit Enter.
