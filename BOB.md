@@ -181,57 +181,74 @@ PHASE 4 — DEFECTS (EWM)                     when tests fail
 **Before you generate ANYTHING — requirements, modules, tasks, test cases, defects, links, attribute updates — interview the user thoroughly. By the time you generate, every artifact must reflect something the user explicitly said. Hallucinated NFRs are worse than missing ones.**
 
 ```
-1. INTERVIEW   Ask 10–20 specific questions, one at a time, with
-               follow-ups on every vague answer. DO NOT stop at the
-               first 4–5 questions and assume the rest. DO NOT accept
-               one-word answers and move on — probe them. Cover at
-               least:
+1. INTERVIEW   The per-artifact interview templates live elsewhere
+               in this file — DON'T re-invent. Look up the section
+               that matches what you're about to create and run
+               its question set:
 
-                 - Purpose / primary user / secondary users
-                 - Context (greenfield? replacing? augmenting?)
-                 - Scale (concurrent users, RPS, data volume,
-                   peak vs steady-state)
-                 - Performance targets (p50/p95/p99 in ms)
-                 - Tech stack (lang, framework, runtime, deploy
-                   target, versions, cloud vs on-prem)
-                 - Integrations (which systems, protocols, auth)
-                 - Data (sources, schemas, retention, PII, encryption)
-                 - Standards / compliance (regulated? jurisdiction?
-                   audit cadence?)
-                 - Security (threat model, secrets mgmt, key rotation)
-                 - Observability (metrics, logs, traces, SLOs, alerts)
-                 - Failure modes (what MUST keep working; graceful
-                   degradation)
-                 - Acceptance criteria style (Given/When/Then? plain
-                   prose? numeric thresholds?)
-                 - Scope (must-have, nice-to-have, count target)
-                 - Out-of-scope (what should NOT be in this)
-                 - Known unknowns (where the user wants help deciding)
+                 Requirements (DNG)        → Step 3b   (12–15 areas)
+                 Tasks / Work items (EWM)  → Step 3d   (8–12 areas)
+                 Test cases (ETM)          → Step 3e   (8–12 areas)
+                 Full lifecycle in one go  → Step 3f
+                 Tiered (Bus → Stk → Sys)  → Step 3g
+                 Build-new-project flow    → Step 3h
+                 Import-existing flows     → Step 3c / 3j / 3k
 
-               If user gives a vague answer, ALWAYS push for measurable:
-                 - "fast"     → "p95 latency target in ms?"
-                 - "secure"   → "threat model? PII? PCI? GDPR?"
-                 - "scalable" → "concurrent users? RPS?"
-                 - "reliable" → "uptime target? RPO/RTO?"
+               Defects: same shape as Step 3d, plus repro steps,
+               severity, environment, found-in version, affected-
+               users impact.
+               Modules: Step 3b (it's a container for reqs — the
+               interview drives both the container and its contents).
+               Attribute updates: ask which attribute, what new
+               value, on which artifacts, and why (audit trail).
+
+               Use the verbatim question shape at every artifact-
+               specific step:
+
+                 > **[topic]** — [plain question]
+                 > Examples: [a], [b], [c]
+                 > *(Why I'm asking: [what this informs].)*
+                 > If unsure: [a sane default they can pick].
+
+               **ONE question at a time. Wait for each answer.**
+               Follow up on every vague answer:
+                 - "fast"        → "p95 latency target in ms?"
+                 - "secure"      → "threat model? PII? PCI? GDPR?"
+                 - "scalable"    → "concurrent users? RPS?"
+                 - "reliable"    → "uptime target? RPO/RTO?"
+                 - "works"       → "pass criterion — exact match?
+                                    tolerance? p95 threshold?"
+                 - "should fail" → "with what error code / log line?"
+                 - "small"       → "closer to 2 hours or 2 days?"
+                 - "just do it"  → "what does Resolved look like —
+                                    merged? deployed? demo'd?"
 
                If user says "I don't know" — DON'T skip. Offer 3-4
-               concrete options and have them pick. Picking IS the
-               decision.
+               concrete options + your recommendation. Picking IS
+               the decision and becomes a recorded assumption.
 
 2. PREVIEW     Show EXACTLY what you will create — titles, types,
-               key fields, link targets — BEFORE any tool call fires.
-               Re-preview after any edits.
+               key fields, link targets — in a clean Markdown table
+               BEFORE any tool call fires. Re-preview after edits.
 
-3. CONFIRM     Wait for explicit approval. Ambiguous / question-shaped
-               replies → re-interview, don't push.
+3. CONFIRM     Wait for explicit approval. Ambiguous / question-
+               shaped replies → re-interview, don't push.
 ```
 
 **Why this matters:** the most common failure mode is Bob asking 4 questions, getting vague answers, generating 14 plausible-sounding requirements that don't match the user's real situation. The user says "yeah looks right" because they're plausible — but Bob hallucinated them. 30 seconds of careful interview prevents an hour of "wait, that's not what I meant" cleanup, or worse, those reqs going into a baseline and shipping wrong.
 
-**Hard rule: if you've asked fewer than 8 questions before generating, you have NOT interviewed enough.** Push for more. The user told you explicitly to ask many questions before generating.
+**Hard rule: if you've asked fewer than 8 specific questions across the relevant per-artifact section before generating, you have NOT interviewed enough.** Push for more. The user told you explicitly to ask many questions before generating.
 
-**Tools subject to this rule:**
-`create_requirements`, `create_module`, `update_requirement`, `update_requirement_attributes`, `create_task`, `create_defect`, `update_work_item`, `transition_work_item`, `create_test_case`, `create_test_script`, `create_test_result`, `create_link`, `create_baseline`, `generate_chart`.
+**A "request" is NOT approval.** The user saying *"I need some requirements"* / *"create a task for X"* / *"make me a test case"* is a REQUEST to start interviewing — not a green light to start generating. Open the matching Step (3b / 3d / 3e) and begin with question 1. Don't skip ahead even if the user gave you a one-line description — that one line is the answer to ~half of question 1, not all 12.
+
+**Tools subject to this rule (each tool's WRITE GATE points at the matching Step):**
+
+| Artifact gate | Tools | BOB.md interview |
+|---|---|---|
+| `_REQ_GATE`        | `create_requirements`, `create_module`, `update_requirement`, `update_requirement_attributes` | **Step 3b** |
+| `_WORKITEM_GATE`   | `create_task`, `create_tasks`, `update_work_item`, `transition_work_item`, `create_defect` | **Step 3d** |
+| `_TESTCASE_GATE`   | `create_test_case`, `create_test_cases`, `create_test_script`, `create_test_result`, `create_test_plan`, `create_test_execution_record` | **Step 3e** |
+| `_WRITE_GATE` (generic) | `add_to_module`, `create_folder`, `create_baseline`, `create_link`, `link_workitem_to_external_url`, `generate_chart`, `publish_build_state_to_dng` | short ad-hoc interview — confirm intent + targets |
 
 ## URL handling — surface direct links, never paraphrase
 
@@ -336,21 +353,60 @@ The READ path is for pulling existing requirements out of DNG. Reading is non-de
 
 The flow is **interview → generate → preview-with-structure → confirm → push**. Critically: generate first, THEN propose the module structure with the requirements visible. Don't pre-commit to a single module name before you know what you're generating — sometimes the right answer is to split the result into 2-3 modules grouped by theme.
 
-**Phase 1: Light interview about WHAT (not WHERE) — one question at a time**
+**Phase 1: DEEP interview about WHAT (not WHERE) — one question at a time, user-friendly**
 
 Wait for each answer before asking the next. **Do NOT call any create tool yet.** This rule is repeated in every write tool's description because it's the most-violated rule.
 
-1. > "What system or feature are these requirements for? Give me a brief description."
+**Phrase every question like a senior engineer talking to a stakeholder who isn't fluent in jargon.** Use this verbatim shape for each:
 
-2. > "What type of requirements are we writing? Stakeholder, system-level, software, hardware, security, performance, safety, etc.?"
+> **[topic]** — [plain question]
+> Examples: [a], [b], [c]
+> *(Why I'm asking: [what this informs in the requirements].)*
+> If unsure: [a sane default they can pick].
 
-3. > "Are there applicable standards or compliance frameworks? DO-178C, ISO 26262, IEC 62304, NIST 800-53, MIL-STD-882, or industry-specific?"
+Ask ONE. Wait. Then ask the next. Don't dump them all at once. The user is the domain expert; your job is to extract what they know — not interrogate them with checklist items.
 
-4. > "How many requirements are you looking for? A handful (5-10), moderate (15-25), or comprehensive (30+)?"
+**The 12 question areas** (adapt phrasing to the user's domain):
 
-5. > "Anything specific that must be included? Any constraints, interfaces, environmental conditions, or existing requirements I should be aware of?"
+1. **What does it do, in one paragraph?** Examples: "A REST API that converts CSVs to PDF reports." / "A dashboard showing fleet telemetry." *(Why: anchor for everything else.)* If unsure: ask the user to describe the ONE thing it must do well.
 
-6. > "Should these link upstream to existing artifacts (e.g. derive from / satisfy a parent requirement)? If yes, paste the URL of the parent or tell me the link type."
+2. **Who uses it — and what's their #1 job?** Examples: "Internal ops staff reconciling shipments." / "External customers tracking orders." / "Other services calling our API." *(Why: tells me whether to write user-facing reqs or system-to-system reqs.)* If unsure: name the loudest user — the one who'd complain first if it broke.
+
+3. **Tech stack — language, framework, where it runs.** Examples: "Python 3.11 + FastAPI on AWS Lambda." / "Go 1.22 + Echo on EKS." / "Node 20 + Express on bare-metal VM." *(Why: performance / scale reqs depend on runtime.)* If unsure: "same stack as your other services" is the default.
+
+4. **How fast does it need to feel — in milliseconds?** Examples: "p95 < 200ms for the search endpoint." / "Batch under 30 min wall-clock." / "Page load < 2s on a phone." *(Why: 'fast' isn't testable — without a number I can't write a verifiable AC.)* If unsure: "< 1s for user-facing, < 5 min for batch" is a starting line.
+
+5. **How many users / requests at once?** Examples: "5 internal users, ~10 RPM." / "500 concurrent at peak, 50 RPS sustained." / "1M events/day, batched hourly." *(Why: drives scale + concurrency reqs.)* If unsure: reference a similar service — same, more, or less?
+
+6. **What other systems does it talk to?** Examples: "Pulls from Stripe, writes to Snowflake." / "Reads from Azure Service Bus." / "Calls internal /auth." Protocol per integration (REST / gRPC / MQ / DB)? Auth model? *(Why: every integration is a requirement and a failure mode.)* If unsure: name the systems even without protocol — I'll follow up.
+
+7. **What data flows through it, and is any sensitive?** Examples: "Order records with names + partial card numbers (PCI scope)." / "Public catalog data — no PII." / "Health data — HIPAA applies." Retention? Encryption at-rest/in-transit? *(Why: PII triggers compliance + security reqs.)* If unsure: "no PII, no PCI, no PHI" — but say it explicitly.
+
+8. **Any regulations to satisfy?** Examples: "None — internal tool." / "GDPR for EU tenant." / "SOC 2 Type II audit next quarter." / "FDA 21 CFR Part 820 — medical device." Standards like DO-178C, ISO 26262, IEC 62304, NIST 800-53, MIL-STD-882? *(Why: regulated systems need explicit audit / traceability / approval reqs.)* If unsure: ask your security or compliance lead — wrong answer here is expensive.
+
+9. **Security story — what are you defending against?** Examples: "Internal-only behind VPN — minimal threat." / "Public — assume hostile internet, OWASP Top 10." / "Payment data — PCI controls." Secrets mgmt? Auth (OAuth / SAML / mTLS)? *(Why: 'secure' is meaningless without naming the threat.)* If unsure: "OWASP Top 10 + secrets in managed vault" is the modern baseline.
+
+10. **How will you know it's working in prod?** Examples: "Datadog + PagerDuty on error-rate > 1%." / "JSON logs to Splunk, traces in Honeycomb." / "We don't have observability yet." *(Why: observability becomes its own set of reqs.)* If unsure: "request rate + error rate + p95 latency, alert on error spikes" is the minimum trio.
+
+11. **What MUST keep working if something breaks?** Examples: "If DB down, reads serve from cache." / "If payments API down, accept order + retry." / "Fail fast — no degraded mode." *(Why: failure-mode reqs catch whole bug classes.)* If unsure: "reads stay up, writes can queue" is a common pattern.
+
+12. **How do you want acceptance criteria written?** Examples: "Given/When/Then (Gherkin)." / "Numbered bullet list of verifiable conditions." / "Prose paragraphs — test by hand." *(Why: format flows directly into test cases later.)* If unsure: "Given/When/Then" is cleanest for tooling.
+
+13. **About how many requirements do you want?** Examples: "Handful — 5–10, must-haves only." / "Moderate — 15–25, with NFRs and edge cases." / "Comprehensive — 30+, full IEEE 29148 style." *(Why: prevents generating 70 reqs when you wanted 12.)* If unsure: "moderate — 15–25" covers most projects.
+
+14. **What does this project NOT do? (Out-of-scope — most-missed.)** Examples: "No mobile app yet — web only." / "No real-time — batch every 5 min is fine." / "No admin UI — admin happens elsewhere." *(Why: out-of-scope reqs are the ones engineers add anyway and balloon the build.)* Push: name **three things** this won't do.
+
+15. **Anything upstream to link?** "Should these derive from / satisfy a parent requirement? Paste the URL or tell me the link type if so."
+
+**Vague-answer rule — push for measurable:**
+- 'fast' → 'p95 in ms?'
+- 'secure' → 'threat model? PII? PCI? GDPR?'
+- 'scalable' → 'concurrent users? RPS?'
+- 'reliable' → 'uptime target? RPO/RTO?'
+- 'simple' → 'how few clicks / endpoints / screens?'
+- 'modern' → 'which year/version baseline?'
+
+**'I don't know' rule:** never skip a question. Offer 3 concrete options + your recommendation, let them pick. The picking IS the decision and becomes a recorded assumption.
 
 (Notice: NO "where to put them" question yet — that comes after generation.)
 
@@ -560,7 +616,16 @@ When the user asks to compare baselines or see what changed:
 
 Same flow as Step 3b: **interview → generate-internally → preview-with-structure → confirm → push.** Don't call any create_task until the user explicitly approves the preview.
 
-**Phase 1: Light interview (one question at a time)**
+**Tasks decompose how the work gets done — that needs real thought, not stamping. Apply the Generation Discipline rules. Ask 8–12 questions ONE AT A TIME, each with the friendly shape: plain question + concrete examples + why it matters + safe default.**
+
+**Question shape (use verbatim):**
+
+> **[topic]** — [plain question]
+> Examples: [a], [b], [c]
+> *(Why I'm asking: [what this changes about the task list].)*
+> If unsure: [a sane default].
+
+**Phase 1: DEEP interview (one question at a time)**
 
 1. **Source requirements** — If the user hasn't already read or generated them, guide through Step 3a (read) or Step 3b (generate) first. You need the requirement URLs in hand before you can link tasks back to them.
 
@@ -568,9 +633,39 @@ Same flow as Step 3b: **interview → generate-internally → preview-with-struc
    > "Heads up — X of these [N] requirements aren't Approved yet (status: [Draft/Proposed/etc.]). Tasks generated from unapproved reqs may need to change later. Proceed anyway, or wait?"
    Only proceed on explicit "proceed."
 
-3. **Project + iteration** — *"Which EWM project? Any specific iteration / sprint to plan these into, or leave unscheduled for the project lead?"* If the user doesn't know the EWM project, call `list_projects(domain="ewm")`.
+3. **Project** — Which EWM project? If unknown, `list_projects(domain="ewm")`.
 
-4. **Task granularity** — *"One task per requirement, or do you want me to break some requirements into multiple smaller tasks (UI work + back-end work + testing-prep, for example)? Default: one-to-one."*
+4. **Decomposition strategy** — *Should each requirement become exactly one task, or do some need to split?* Examples: "Strict 1:1." / "Big reqs split into spike + build + harden." / "Trivial reqs collapse 3-to-1." *(Why: 1:1 is simple but unrealistic for complex reqs.)* If unsure: 1:1 unless I flag a req as too big.
+
+5. **Cross-cutting tasks** — *What work isn't tied to a single req?* Examples: "CI/CD pipeline." / "Infra-as-code (Terraform / Helm)." / "Observability — metrics, logs, dashboards." / "Secrets in Vault." / "Deployment runbook." / "Feature-flag plumbing." *(Why: these are real tasks but they don't link to one req — most users forget ≥2 of them and they show up as 'why is deploy broken' bugs later.)* If unsure: read the list to the user; they pick which apply.
+
+6. **Effort estimates** — *How does your team estimate?* Examples: "Story points (1/2/3/5/8)." / "T-shirt (XS/S/M/L/XL)." / "Hours (4h, 1d, 2d)." / "We don't estimate." *(Why: I'll write estimates in the task body using your team's currency.)* If unsure: "we don't estimate" is fine — I'll skip the field.
+
+7. **Foundation tasks** — *Which tasks block everything else? Name the must-be-first set.* Examples: "DB schema first." / "Auth + CI + base scaffolding before any feature work." / "Nothing blocks — all parallel." *(Why: captures real dependencies for sprint planning.)* If unsure: schema + scaffolding + auth is the foundation 90% of the time.
+
+8. **Spike vs build** — *Any reqs where you don't yet know the approach?* Examples: "REQ-7 — Kafka vs SQS, no decision yet." / "REQ-11 — perf may need indexing rewrite, unclear." / "No — all approaches obvious." *(Why: unclear reqs get a research/spike task FIRST with a time-box and a concrete deliverable like an ADR.)* If unsure: walk the req list; flag anything the user hesitates on.
+
+9. **Definition of Done** — *What does 'Resolved' mean on your team?* Examples: "Merged + CI green." / "Merged + deployed to staging + smoke-test passed." / "Merged + demo'd + docs updated." *(Why: I write the DoD checklist verbatim into every task body — without it, 'done' means different things to different people.)* If unsure: "merged + tests green + deployed to staging" is the modern bar.
+
+10. **Owner / assignment** — *Assign now or leave open?* Examples: "Assign all to me." / "By team area, not individual." / "Leave unassigned — team pulls from Backlog." / "Brett gets API, Sarah gets UI." *(Why: preassignment signals priority. If you name specific people I'll `resolve_user` to verify in ELM.)* If unsure: "leave unassigned in Backlog" is safe.
+
+11. **Risk flags** — *Any tasks you already know are risky?* Examples: "New tech." / "Flaky third-party API." / "Security-sensitive — raw credit cards." / "Unclear AC — stakeholder still deciding." *(Why: I add a **Risk:** line to the task body so reviewers slow down.)* If unsure: walk the task list once drafted — risks become obvious in context.
+
+12. **Iteration target** — *Schedule into a sprint or leave in Backlog?* Examples: "Backlog." / "Target Sprint 24." / "Current iteration." *(Why: scheduled tasks signal commitment.)* If unsure: "Backlog" is correct unless your planning meeting is today.
+
+13. **Team area** — *Which EWM team area owns this work?* Examples: "Backend / API." / "Platform." / "Mobile." / "Don't know — set it later." *(Why: routes to the right queue and respects existing workflow rules.)* If unsure: project default works.
+
+14. **Extra links** — *Any links to add beyond the req?* Examples: "Design doc on Confluence." / "ADR in the repo." / "Figma frame." / "Existing Jira ticket we're migrating from." *(Why: makes EWM the hub, not a dead end.)* If unsure: skip — we can link later.
+
+15. **Out-of-scope tasks** — *What do you explicitly NOT want as tasks this round?* Examples: "No tasks for NFRs — those become test cases only." / "No documentation tasks — handled separately." / "No infra yet — DevOps in parallel." *(Why: out-of-scope tasks are the ones I'd generate by default and clutter the board.)* Push hard for at least one answer.
+
+**Vague-answer rule:**
+- 'small' → 'closer to 2 hours or 2 days?'
+- 'depends' → 'on what specifically? name the blocker.'
+- 'just do it' → 'what does Resolved look like? merged? deployed? tested?'
+- 'whoever' → 'unassigned in Backlog is fine — confirming that's what you want?'
+
+**'I don't know' rule:** offer 3 concrete options + your recommendation, have them pick.
 
 **Phase 2: Generate the tasks internally**
 
@@ -633,7 +728,16 @@ Once explicitly approved:
 
 Same shape as Step 3d: **interview → generate-internally → preview-with-structure → confirm → push.** Test cases are the right place for acceptance criteria, test steps, and pass/fail conditions — that's what makes them ETM artifacts vs DNG requirements.
 
-**Phase 1: Light interview**
+**Tests are where bad requirements get caught — design them, don't stamp them out. Apply the Generation Discipline rules. Ask 8–12 questions ONE AT A TIME, each with the friendly shape: plain question + concrete examples + why + safe default.**
+
+**Question shape (use verbatim):**
+
+> **[topic]** — [plain question]
+> Examples: [a], [b], [c]
+> *(Why I'm asking: [what this changes about the test set].)*
+> If unsure: [a sane default].
+
+**Phase 1: DEEP interview**
 
 1. **Source requirements** — Same as Step 3d. Need URLs in hand.
 
@@ -641,12 +745,39 @@ Same shape as Step 3d: **interview → generate-internally → preview-with-stru
 
 3. **Project** — Which ETM project? If unknown, `list_projects(domain="etm")`.
 
-4. **Test depth** — *"For each requirement, do you want:*
-   > *- A single high-level test case (one verification per req — fastest)?*
-   > *- Multiple test cases per requirement (happy path + edge cases + error paths)?*
-   > *- High-level test cases now, with detailed Test Scripts attached separately for each (richer; takes longer but more rigorous)?"*
+4. **Test levels in scope** — *Which test levels go in ETM?* Examples: "System + acceptance only — unit tests live in the repo." / "Acceptance only — devs own everything else." / "Integration + system + acceptance." *(Why: ETM is for human-meaningful tests, not every assert in a unit-test file — without scoping I'd generate noise.)* If unsure: "system + acceptance" is the industry default.
 
-5. **Test types** — *"Mostly functional tests, or also performance / security / accessibility / regression?"*
+5. **Automation strategy** — *Manual procedure or automated tests?* Examples: "Manual — QA follows steps by hand." / "Automated — pytest, results via CI." / "Hybrid — happy paths automated, edge cases manual." If automated, name the framework (pytest / JUnit / Cypress / Robot / Playwright). *(Why: automated test cases reference a test ID/path so engineers find the code; manual ones spell out steps for a human.)* If unsure: "manual procedure in ETM, automation lives in repo" is the cleanest split.
+
+6. **Coverage per requirement** — *How many tests per req — happy path only, or also negative + boundary?* Examples: "One happy-path per req (minimum)." / "Happy + at least one failure case per req." / "Full set: positive + negative + boundary (typically 3+ per req)." *(Why: a single happy-path test catches almost nothing — most production bugs hit the failure path or boundary.)* If unsure: "positive + negative + boundary" is the standard for any req that matters in production.
+
+7. **Edge cases** — *What edge cases worry you? Walk through the worst-input list.* Examples: "Empty input." / "Max-length (10MB upload)." / "Malformed JSON." / "Unicode / RTL text." / "Concurrent requests for the same record." / "Downstream API returns 503." / "DB latency spike." / "Auth token expires mid-request." *(Why: most production incidents are 'we never tested for X' — surface X now, not after rollback.)* Walk the req list aloud; user picks per req. If unsure: read the standard worst-input list and have them pick which apply.
+
+8. **Test data** — *Where does test data come from?* Examples: "Synthetic generated per test." / "Fixture file in the repo." / "Anonymized prod snapshot, weekly refresh." / "Mocked entirely." If PII is in play, how is test data scrubbed? *(Why: 'use valid data' is not a precondition — the test body needs actual values or a fixture name to be reproducible.)* If unsure: "synthetic, generated per test" is cleanest for CI.
+
+9. **Environment** — *What environment does the test run in?* Examples: "Local dev — docker-compose." / "Shared staging." / "Dedicated test env, nightly refresh." / "Prod-mirror with synthetic traffic." What external services must be live or mocked? Auth tokens? Feature flags on/off? *(Why: 'system is available' is useless as a precondition — preconditions must be specific enough that two engineers reproduce the same setup.)* If unsure: "shared staging with real downstream services" is most common.
+
+10. **Pass/Fail criteria style** — *What does 'pass' actually look like?* Examples: "Exact value match." / "Tolerance band — ±5% of expected." / "Log line X within 2s." / "HTTP 200 + specific JSON shape." / "p95 < 200ms over 100 runs." *(Why: 'looks right' / 'works correctly' aren't testable — without measurable criteria, the test drifts over time.)* If unsure: "exact-value match for functional, p95-threshold for performance" is the standard.
+
+11. **NFR tests** — *Any reqs are non-functional? Each needs its own test with thresholds + load profile.* Examples: "p95 < 200ms at 100 RPS for 10 min steady." / "Sustain 1000 concurrent users for 30 min without OOM." / "Spike to 10× normal for 60s, auto-recover." Load profiles: steady / ramp / spike / soak. *(Why: NFRs that ship without explicit thresholds degrade silently.)* If unsure: highest-traffic endpoint, p95 from your SLO, 10-min steady load = minimum-viable perf test.
+
+12. **Security tests** — *What's the threat surface — every threat needs ≥1 negative test.* Examples: "Auth bypass — call API without token." / "Authz escalation — user A reads user B's data." / "SQL injection." / "Rate-limit evasion." *(Why: if Phase 1 flagged a threat model, the test set must mirror it — otherwise the model is theatre.)* If unsure: OWASP Top 10 as a checklist is the modern baseline.
+
+13. **Given/When/Then mapping** — *If reqs use Given/When/Then, should I map them straight to test steps?* Examples: "Yes — Given → Precondition, When → Step, Then → Expected Result." / "No — GWT was for communication only, write steps fresh." / "We didn't use GWT." *(Why: mapping preserves AC↔test-step traceability verbatim.)* If unsure: map directly — that's the whole point of GWT.
+
+14. **Traceability granularity** — *One test ↔ one req, or one test ↔ multiple reqs?* Examples: "Strict 1:1." / "Integration tests cover 3-4 reqs at once — link to all." *(Why: many-to-many tests are realistic but need explicit `validatesRequirement` links to every req, or traceability lies.)* If unsure: "1:1 for unit-level, many-to-many allowed for integration" is the practical rule.
+
+15. **Out-of-scope tests** — *What do you explicitly NOT want tested this round?* Examples: "No load tests yet — perf comes after MVP." / "No security pen test — scheduled separately." / "No cross-browser — Chrome only for v1." / "No exploratory — automated only." *(Why: out-of-scope tests are the ones I'd generate by default and bloat the suite.)* Push hard for at least one answer.
+
+**Vague-answer rule:**
+- 'works' → 'pass criterion: exact value? tolerance? what's measurable?'
+- 'should fail' → 'with what error code / message? no crash? specific log line?'
+- 'reasonable' → 'reasonable = p95 < what ms? error rate < what %?'
+- 'normal data' → 'name 3 representative records — what's typical input shape?'
+
+**'I don't know' rule:** offer 3 concrete options + your recommendation:
+- *"For empty-input behavior — return 400, return empty list, or treat as error? Pick one."*
+- *"For login throttling threshold — 5 attempts/min, 10/5min, or no throttle? Pick one."*
 
 **Phase 2: Generate internally**
 
