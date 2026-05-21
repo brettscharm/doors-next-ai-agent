@@ -406,6 +406,149 @@ _BOB_ALWAYS_ALLOW = [
 # user before running. See Bob compatibility audit findings (v0.1.13).
 
 
+# ── BOB Atlassian Connector ────────────────────────────────────
+#
+# The BOB Atlassian Connector is NOT a server we run. Atlassian operates an
+# HTTP MCP server at https://mcp.atlassian.com/v1/mcp; the connector is just
+# a stdio<->HTTP bridge (the `mcp-remote` npm package) configured so that
+# stdio-only hosts like IBM Bob can talk to Atlassian's hosted server. We
+# write the bridge config into every detected host alongside the elm-mcp
+# entry, so the JIRA IMPORT path (BOB.md Step 3l, /import-jira prompt) can
+# round-trip Jira <-> DNG without manual config.
+#
+# Triggered by:  python3 setup.py --with-atlassian
+#
+# Prerequisite: Node.js installed (npx must be on PATH). On first launch,
+# `npx mcp-remote` opens a browser for Atlassian OAuth; the token is cached
+# under ~/.mcp-auth for subsequent runs.
+
+_ATLASSIAN_ENDPOINT = "https://mcp.atlassian.com/v1/mcp"
+
+# Read-only Atlassian tools — safe to auto-approve in Bob's alwaysAllow.
+# WRITE tools (createJiraIssue, addCommentToJiraIssue, updateJiraIssue,
+# createJiraRemoteIssueLink, etc.) are deliberately omitted so every Jira
+# write requires explicit user confirmation. Same convention as elm-mcp.
+_ATLASSIAN_ALWAYS_ALLOW = [
+    "getAccessibleAtlassianResources",
+    "getVisibleJiraProjects",
+    "getJiraIssue",
+    "getJiraProjectIssueTypesMetadata",
+    "getJiraIssueTypeMetaWithFields",
+    "searchJiraIssuesUsingJql",
+    "lookupJiraAccountId",
+    "getConfluencePage",
+    "getConfluenceSpaces",
+    "searchConfluenceUsingCql",
+    "search",
+]
+
+
+def find_npx() -> "str | None":
+    """Locate the absolute path to npx. IBM Bob's schema rejects bare
+    command names — every command must be an absolute filesystem path.
+    Returns None if Node/npx isn't installed.
+    """
+    p = shutil.which("npx")
+    return p
+
+
+def make_atlassian_entry(npx_exe: str, *, include_type: bool,
+                          with_always_allow: bool) -> dict:
+    """Build the MCP entry that points a stdio-only host at Atlassian's
+    HTTP MCP server via the mcp-remote bridge.
+
+    `include_type`: True for VS Code (its schema requires "type": "stdio").
+    `with_always_allow`: True for Bob (which honors the alwaysAllow array).
+    """
+    entry = {
+        "command": npx_exe,
+        "args": ["-y", "mcp-remote", _ATLASSIAN_ENDPOINT],
+    }
+    if include_type:
+        entry = {"type": "stdio", **entry}
+    if with_always_allow:
+        entry["alwaysAllow"] = list(_ATLASSIAN_ALWAYS_ALLOW)
+    return entry
+
+
+def configure_atlassian_connector(npx_exe: str) -> int:
+    """Write the BOB Atlassian Connector entry into every detected host.
+    Mirrors the per-host targets used by configure_hosts() for elm-mcp.
+    Returns the number of files actually touched (added/updated/exists).
+    """
+    home = Path.home()
+
+    # Each target: (host_label, file_path, root_key, include_type, with_allow)
+    # root_key is "mcpServers" everywhere except VS Code, which uses "servers".
+    targets: list[tuple[str, Path, str, bool, bool]] = []
+
+    if host_present_claude_code(home):
+        ok("Claude Code: detected — adding BOB Atlassian Connector")
+        targets.append(("Claude Code (user, ~/.claude.json)",
+                        home / ".claude.json", "mcpServers", False, False))
+        targets.append(("Claude Code (project, .mcp.json)",
+                        HERE / ".mcp.json", "mcpServers", False, False))
+
+    if host_present_bob(home):
+        ok("IBM Bob: detected — adding BOB Atlassian Connector")
+        targets.append(("Bob (~/.bob/mcp_settings.json, global)",
+                        home / ".bob" / "mcp_settings.json",
+                        "mcpServers", False, True))
+        targets.append(("Bob (<project>/.bob/mcp.json, project)",
+                        HERE / ".bob" / "mcp.json",
+                        "mcpServers", False, True))
+
+    if host_present_vscode(home):
+        ok("VS Code (Copilot): detected — adding BOB Atlassian Connector")
+        # VS Code's MCP schema uses key "servers" and requires "type": "stdio"
+        targets.append(("VS Code (workspace, .vscode/mcp.json)",
+                        HERE / ".vscode" / "mcp.json",
+                        "servers", True, False))
+
+    if host_present_cursor(home):
+        ok("Cursor: detected — adding BOB Atlassian Connector")
+        targets.append(("Cursor (workspace, .cursor/mcp.json)",
+                        HERE / ".cursor" / "mcp.json",
+                        "mcpServers", False, False))
+        targets.append(("Cursor (user, ~/.cursor/mcp.json)",
+                        home / ".cursor" / "mcp.json",
+                        "mcpServers", False, False))
+
+    if host_present_windsurf(home):
+        ok("Windsurf: detected — adding BOB Atlassian Connector")
+        targets.append(("Windsurf (~/.codeium/windsurf/mcp_config.json)",
+                        home / ".codeium" / "windsurf" / "mcp_config.json",
+                        "mcpServers", False, False))
+
+    if not targets:
+        warn("No AI hosts detected for the BOB Atlassian Connector.")
+        info("Run setup.py without --with-atlassian first to install hosts, "
+             "or install Claude Code / IBM Bob / Cursor / Windsurf / VS Code.")
+        return 0
+
+    written = 0
+    for label, path, root_key, include_type, with_allow in targets:
+        entry = make_atlassian_entry(
+            npx_exe,
+            include_type=include_type,
+            with_always_allow=with_allow,
+        )
+        status = merge_into(path, root_key, "atlassian", entry)
+        if status == "added":
+            ok(f"  added   -> {path}")
+            written += 1
+        elif status == "updated":
+            ok(f"  updated -> {path}")
+            written += 1
+        elif status == "exists":
+            ok(f"  already configured: {path}")
+            written += 1
+        # "error" already logged by merge_into
+
+    return written
+
+
+
 def write_bob(py_exe: str, home: Path) -> list[tuple[str, str, Path]]:
     """IBM Bob reads two MCP configs (global + project), both with the
     standard mcpServers top-level key. Bob's per-server schema also accepts
@@ -683,6 +826,33 @@ def test_credentials() -> bool:
     return False
 
 
+# ── BOB Atlassian Connector finale ────────────────────────────
+
+def _print_atlassian_finale(npx_exe: str) -> None:
+    """User-facing 'what to do next' summary after the Atlassian Connector
+    is wired into the host configs. The first launch of the connector opens
+    a browser for OAuth — make sure the user knows that's coming."""
+    print()
+    print(f"  {BOLD}BOB Atlassian Connector — next steps:{RESET}\n")
+    print(f"  {BOLD}1. Fully quit your AI host{RESET} (Bob / Claude / Cursor / etc. —")
+    print(f"     Cmd+Q on Mac, not just close window), then reopen.")
+    print()
+    print(f"  {BOLD}2. First Atlassian tool call triggers OAuth.{RESET}")
+    print(f"     A browser tab opens — log into your Atlassian instance,")
+    print(f"     grant access, close the tab. Token caches at {DIM}~/.mcp-auth/{RESET}")
+    print()
+    print(f"  {BOLD}3. Verify the connector{RESET} — in your AI host's chat, ask:")
+    print(f"     {GREEN}'list my Jira projects'{RESET}")
+    print(f"     Should call {DIM}getAccessibleAtlassianResources{RESET} and return your cloud ID(s).")
+    print()
+    print(f"  {BOLD}4. Use the new flow:{RESET}")
+    print(f"     {GREEN}'/import-jira issue_key=YOUR-123'{RESET} — round-trips the issue into DNG.")
+    print()
+    print(f"  {DIM}Endpoint:   {_ATLASSIAN_ENDPOINT}{RESET}")
+    print(f"  {DIM}Bridge:     {npx_exe} -y mcp-remote ...{RESET}")
+    print(f"  {DIM}Reinstall:  python3 setup.py --atlassian-only{RESET}")
+
+
 # ── --diagnose mode ──────────────────────────────────────────
 
 def diagnose() -> int:
@@ -771,6 +941,20 @@ def main() -> int:
              "for copy-paste into IBM Bob / Claude Code / VS Code / etc. Doesn't "
              "install or change anything — pure stdout.",
     )
+    parser.add_argument(
+        "--with-atlassian", action="store_true",
+        help="Also install the BOB Atlassian Connector — a stdio<->HTTP bridge "
+             "(via the `mcp-remote` npm package) that lets stdio-only hosts "
+             "like IBM Bob talk to Atlassian's hosted MCP server at "
+             "https://mcp.atlassian.com/v1/mcp. Required for the /import-jira "
+             "prompt (BOB.md Step 3l) to work. Requires Node.js installed.",
+    )
+    parser.add_argument(
+        "--atlassian-only", action="store_true",
+        help="ONLY install the BOB Atlassian Connector — skip the elm-mcp "
+             "install steps entirely. Use this if elm-mcp is already set up "
+             "and you just want to add the Atlassian Connector alongside it.",
+    )
     args = parser.parse_args()
 
     if args.diagnose:
@@ -778,6 +962,25 @@ def main() -> int:
 
     if args.print_config:
         return print_config()
+
+    # --atlassian-only short-circuit: skip elm-mcp setup entirely.
+    if args.atlassian_only:
+        print(f"{BOLD}BOB Atlassian Connector — Setup{RESET}")
+        print(f"{DIM}Skipping elm-mcp install (--atlassian-only).{RESET}\n")
+        npx_exe = find_npx()
+        if not npx_exe:
+            fail("npx not found on PATH. The Atlassian Connector uses the "
+                 "`mcp-remote` npm package, which requires Node.js.")
+            info("Install Node from https://nodejs.org "
+                 "(or `brew install node` on macOS), then re-run:")
+            info("  python3 setup.py --atlassian-only")
+            return 1
+        ok(f"Found npx at: {npx_exe}")
+        written = configure_atlassian_connector(npx_exe)
+        if written == 0:
+            return 1
+        _print_atlassian_finale(npx_exe)
+        return 0
 
     print(f"{BOLD}DOORS Next AI Agent — Setup{RESET}")
     print(f"{DIM}Project dir: {HERE}{RESET}")
@@ -821,6 +1024,24 @@ def main() -> int:
     # aren't entered yet, the server still loads its tools without them.
     print()
     test_credentials()
+
+    # ── Optional: BOB Atlassian Connector ───────────────────────────
+    # Installs the mcp-remote bridge so Bob (and other stdio hosts) can
+    # talk to Atlassian's hosted MCP server at mcp.atlassian.com/v1/mcp.
+    # Required for /import-jira to work.
+    if args.with_atlassian:
+        print()
+        print(f"{BOLD}BOB Atlassian Connector{RESET}")
+        npx_exe = find_npx()
+        if not npx_exe:
+            fail("npx not found on PATH. Skipping the Atlassian Connector.")
+            info("Install Node from https://nodejs.org "
+                 "(or `brew install node` on macOS), then re-run:")
+            info("  python3 setup.py --atlassian-only")
+        else:
+            ok(f"Found npx at: {npx_exe}")
+            configure_atlassian_connector(npx_exe)
+            _print_atlassian_finale(npx_exe)
 
     print(f"\n{GREEN}{BOLD}Setup complete.{RESET}\n")
 
