@@ -68,13 +68,18 @@ import mcp.server.stdio
 from dotenv import load_dotenv
 from doors_client import DOORSNextClient
 
+# Jira client is lazy-imported inside the handlers so the server starts
+# fine even if a user hasn't configured Jira creds yet (it's optional).
+# See jira_client.py for the direct-REST approach + why we don't use
+# Atlassian's hosted MCP server.
+
 load_dotenv()
 
 # Bumped on each release. The auto-update logic below uses this to
 # decide if a newer GitHub release exists; the `connect_to_elm`
 # response also surfaces it so users always know what version they're
 # running.
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 GITHUB_REPO = "brettscharm/elm-mcp"
 
 app = Server("elm-mcp")
@@ -1030,42 +1035,37 @@ async def list_prompts() -> list[Prompt]:
         Prompt(
             name="import-jira",
             description=(
-                "Live Jira import — pulls a Jira issue via the Atlassian "
-                "MCP server (must be installed alongside elm-mcp), runs "
+                "Live Jira import — pulls a Jira issue via elm-mcp's native "
+                "`get_jira_issue` tool (direct REST, API-token auth), runs "
                 "interview discipline on the ticket body, creates DNG "
                 "requirements with a `Source: JIRA-XXX` back-reference "
-                "stamped per req, and posts a Jira comment listing the "
-                "created DNG URLs. Bidirectional traceability via two peer "
-                "MCP servers — elm-mcp and Atlassian MCP — orchestrated by "
-                "the LLM, not by MCP-to-MCP calls. Falls back to suggesting "
-                "/import-requirements (paste) or /import-work-item (PDF) if "
-                "the Atlassian MCP isn't connected. See BOB.md Step 3l for "
-                "the full playbook."
+                "stamped per req, and posts a Jira back-link via "
+                "`add_jira_comment`. Bidirectional Jira ↔ DNG traceability "
+                "without depending on Atlassian's hosted MCP server (which "
+                "uses OAuth and doesn't complete in IBM Bob's embedded "
+                "webview). Requires JIRA_BASE_URL / JIRA_EMAIL / "
+                "JIRA_API_TOKEN in .env — run `python3 ~/.elm-mcp/setup.py "
+                "--with-jira` to set them up. See BOB.md Step 3l."
             ),
             arguments=[
                 PromptArgument(
                     name="issue_key",
-                    description="Jira issue key like 'PROJ-123' OR a full Atlassian URL like 'https://yourorg.atlassian.net/browse/PROJ-123'. Optional — AI will ask if not provided.",
-                    required=False,
-                ),
-                PromptArgument(
-                    name="cloud_id",
-                    description="Atlassian cloud ID. Optional — AI calls Atlassian MCP's `getAccessibleAtlassianResources` to discover it.",
+                    description="Jira issue key like 'PROJ-123' OR a full Atlassian URL. Optional — AI will ask if not provided.",
                     required=False,
                 ),
                 PromptArgument(
                     name="dng_project",
-                    description="DNG project where the requirements module should be created. Optional — AI uses the currently-connected project or asks.",
+                    description="DNG project where the requirements module should be created. Optional.",
                     required=False,
                 ),
                 PromptArgument(
                     name="module_name",
-                    description="Name for the new DNG module. Optional — AI suggests one based on the Jira ticket's summary if not provided.",
+                    description="Name for the new DNG module. Optional.",
                     required=False,
                 ),
                 PromptArgument(
                     name="walk_graph",
-                    description="'parent' (also pull parent epic), 'children' (also pull child stories — useful for epics), 'both', or 'none'. Optional — default is to ask the user when ambiguous.",
+                    description="'parent', 'children', 'both', or 'none'. Optional — default is to ask when ambiguous.",
                     required=False,
                 ),
             ],
@@ -1902,7 +1902,6 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
 
     elif name == "import-jira":
         issue_key = args.get("issue_key", "").strip()
-        cloud_id = args.get("cloud_id", "").strip()
         dng_proj = args.get("dng_project", "").strip()
         module_name = args.get("module_name", "").strip()
         walk_graph = args.get("walk_graph", "").strip().lower()
@@ -1912,243 +1911,133 @@ async def get_prompt(name: str, arguments: dict | None = None) -> list[PromptMes
             "bidirectional links: DNG requirements stamped with a "
             "`Source: JIRA-XXX` reference + a comment posted back to the "
             "Jira issue listing the created DNG URLs.\n\n"
-            "**This is Step 3l in BOB.md** — read that section for the full "
-            "playbook. Summary below.\n\n"
-            "**Architecture:** elm-mcp and the Atlassian MCP server are "
-            "peer MCP servers. YOU (the LLM) orchestrate by calling tools "
-            "from BOTH in sequence. Do NOT try to call Jira's REST API "
-            "directly from elm-mcp — elm-mcp has no Jira client. Do NOT "
-            "fork either MCP — the integration lives in this prompt.\n\n"
+            "**This is Step 3l in BOB.md.**\n\n"
+            "**Architecture:** elm-mcp talks to Jira's REST API DIRECTLY "
+            "via the native `get_jira_issue` / `search_jira_issues` / "
+            "`add_jira_comment` / `add_jira_remote_link` tools (Basic "
+            "auth with the user's API token). NO Atlassian MCP server, "
+            "NO `mcp-remote` bridge, NO OAuth. Credentials live in .env "
+            "as JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN. If the user "
+            "hasn't set those yet, `get_jira_issue` returns a clear "
+            "configuration error — surface it verbatim and tell them to "
+            "run `python3 ~/.elm-mcp/setup.py --with-jira`.\n\n"
         )
 
-        # ── Atlassian MCP availability check ──────────────────────
-        prereq_block = (
-            "## STEP 0 — verify Atlassian MCP is connected\n\n"
-            "Before doing anything else, confirm the Atlassian MCP server "
-            "is available. The signal: tools like `getJiraIssue`, "
-            "`searchJiraIssuesUsingJql`, `addCommentToJiraIssue`, and "
-            "`getAccessibleAtlassianResources` are visible to you in the "
-            "current tool list.\n\n"
-            "If those tools are NOT visible, tell the user:\n\n"
-            "> *\"To pull live from Jira I need the Atlassian MCP server "
-            "installed alongside elm-mcp. Install it from "
-            "https://github.com/atlassian/atlassian-mcp-server and "
-            "reconnect, then we'll round-trip. For now, want to paste the "
-            "ticket text instead? I'll route to `/import-requirements` "
-            "(single-artifact) or `/import-work-item` (multi-artifact).\"*\n\n"
-            "Then STOP. Don't proceed with this prompt until Atlassian MCP "
-            "is connected.\n\n"
-        )
-
-        # ── Input block ───────────────────────────────────────────
         if issue_key:
-            # Strip URL form to a bare key if user gave a URL.
             display_key = issue_key
             if "/browse/" in issue_key:
-                # User pasted a URL like https://x.atlassian.net/browse/PROJ-123
                 try:
                     display_key = issue_key.rstrip("/").split("/browse/")[-1].split("?")[0].split("#")[0]
                 except Exception:
                     display_key = issue_key
             input_block = (
                 f"## Target issue: `{display_key}`\n\n"
-                f"The user has identified the Jira issue: `{issue_key}`. "
-                f"Use this verbatim when calling `getJiraIssue`. Don't ask "
-                f"them to confirm the key — they already gave it.\n\n"
+                f"Pass `{issue_key}` verbatim as `issue_key=` to "
+                f"`get_jira_issue`. The tool accepts bare keys "
+                f"(PROJ-123) and full browse URLs.\n\n"
             )
         else:
             input_block = (
                 "## Target issue: not yet provided\n\n"
-                "The user hasn't given a Jira issue key. Ask once:\n\n"
-                "> *\"Which Jira issue should I pull? Send the key "
-                "(e.g. `PROJ-123`) or the full browse URL "
-                "(e.g. `https://yourorg.atlassian.net/browse/PROJ-123`).\"*\n\n"
-                "Wait for the answer before moving on.\n\n"
+                "Ask once: *\"Which Jira issue should I pull? Send the "
+                "key (e.g. `PROJ-123`) or the full browse URL.\"*\n\n"
             )
 
-        # ── CloudId block ─────────────────────────────────────────
-        if cloud_id:
-            cloud_block = (
-                f"## Cloud ID: `{cloud_id}`\n\n"
-                f"User provided cloud_id. Pass this to every Atlassian MCP "
-                f"call. Don't re-discover it.\n\n"
-            )
-        else:
-            cloud_block = (
-                "## Cloud ID: not provided — discover it\n\n"
-                "Call `getAccessibleAtlassianResources()` to discover the "
-                "user's Atlassian cloud(s). If one cloud → use it silently. "
-                "If multiple → ask which one. **Do NOT ask the user for the "
-                "raw cloudId** — they don't know it; you discover it.\n\n"
-            )
-
-        # ── Walk-graph block ──────────────────────────────────────
         if walk_graph in ("parent", "children", "both"):
-            walk_block = (
-                f"## Graph walk: `{walk_graph}` (per user instruction)\n\n"
-            )
+            walk_block = f"## Graph walk: `{walk_graph}`\n\n"
             if walk_graph in ("parent", "both"):
                 walk_block += (
-                    "- Pull the parent epic/initiative as context. Call "
-                    "`getJiraIssue(cloudId, <parent_key>)` once the main "
-                    "issue's parent link is known. Use the parent body for "
-                    "framing only — don't create separate reqs from it "
-                    "unless the user explicitly says to.\n"
+                    "- Pull parent for context via `get_jira_issue` "
+                    "(use `parent.key` from main issue result). Context "
+                    "only — don't create separate DNG reqs from it "
+                    "unless asked.\n"
                 )
             if walk_graph in ("children", "both"):
                 walk_block += (
-                    "- Pull child stories. Call `searchJiraIssuesUsingJql("
-                    "cloudId, jql=\"parent = <key>\")`. Each child becomes "
-                    "a candidate requirement-set; preview all of them "
-                    "BEFORE creating anything in DNG.\n"
+                    "- Pull children via "
+                    "`search_jira_issues(jql=\"parent = <key>\")`. "
+                    "Preview ALL of them BEFORE creating anything in DNG.\n"
                 )
             walk_block += "\n"
         elif walk_graph == "none":
             walk_block = (
-                "## Graph walk: NONE (per user instruction)\n\n"
-                "Use only the main issue's body. Don't pull parent or "
-                "children even if links exist.\n\n"
+                "## Graph walk: NONE — use only the main issue's body.\n\n"
             )
         else:
             walk_block = (
                 "## Graph walk: ASK after main pull\n\n"
-                "After `getJiraIssue` returns, inspect the result:\n"
-                "- If the issue has children (Epic with stories), ASK: "
-                "*\"This epic has N child stories. Want me to pull them "
-                "too for context, or just import from the epic body?\"*\n"
-                "- If the issue has a parent (Story under an Epic), ASK: "
-                "*\"This story rolls up to <EPIC-KEY>. Want me to pull "
-                "the parent epic for framing too?\"*\n"
-                "- Default: don't auto-walk. Walking is expensive and "
-                "expands scope.\n\n"
+                "- If issue has children (Epic with stories), ASK before "
+                "pulling them.\n"
+                "- If issue has a parent (Story under Epic), ASK before "
+                "pulling parent.\n"
+                "- Default: don't auto-walk.\n\n"
             )
 
-        # ── Target block ──────────────────────────────────────────
         target_block = "## DNG target\n\n"
         target_block += (
-            f"DNG project: `{dng_proj}` (use this; don't ask).\n"
-            if dng_proj
-            else "DNG project: not specified. Use the currently-connected "
-                 "project; if none is connected, call `connect_to_elm` "
-                 "first, then ask which project.\n"
+            f"DNG project: `{dng_proj}`.\n" if dng_proj
+            else "DNG project: not specified. Use currently-connected "
+                 "project or call `connect_to_elm` first.\n"
         )
         target_block += (
-            f"Module name: `{module_name}` (use this; don't ask).\n\n"
-            if module_name
-            else "Module name: suggest one based on the Jira issue's "
-                 "summary — e.g. `JIRA-1234: Tracking Service - System "
-                 "Requirements`. Make the suggestion concrete and ask the "
-                 "user to confirm or edit before pushing.\n\n"
+            f"Module name: `{module_name}`.\n\n" if module_name
+            else "Module name: suggest one based on Jira summary, e.g. "
+                 "`JIRA-1234: Tracking Service - System Requirements`.\n\n"
         )
 
-        # ── Workflow ──────────────────────────────────────────────
         workflow = (
-            "## Workflow (12 steps — match BOB.md Step 3l)\n\n"
-            "1. **Resolve cloudId** (see Cloud ID section above).\n\n"
-            "2. **Pull the issue** — `getJiraIssue(cloudId, issueIdOrKey)`. "
-            "Save the result. Surface a compact summary to the user: key, "
-            "type, status, summary, assignee, counts (description-length, "
-            "AC-count, linked-issue-count, comment-count).\n\n"
-            "3. **Walk the graph** (see Graph Walk section above).\n\n"
-            "4. **Parse into FIVE buckets** (same as `/import-requirements` "
-            "and `/import-work-item`):\n"
-            "   - Functional reqs — atomic 'shall' statements from "
-            "Description / Functional Requirements\n"
-            "   - Non-functional reqs — performance, security, retention, "
-            "etc.\n"
-            "   - Acceptance criteria — HOLD for ETM, do NOT push to DNG\n"
-            "   - Constraints / Risks / Assumptions — ask once, default "
-            "skip\n"
-            "   - Skipped — Business Goal, In/Out of Scope, DoD, "
-            "sprint/board metadata\n\n"
-            "5. **Run the interview discipline** (v0.7.0 per-artifact "
-            "write gates). The Jira ticket gives you SEED material, not "
-            "the full set — re-elicit context. **The fact that the input "
-            "came from Jira does NOT bypass the interview gate.**\n\n"
-            "6. **Show a structured preview** — counts + every parsed "
-            "item in full + Jira source for each (so user can sanity-"
-            "check). Note what was skipped and why.\n\n"
-            "7. **Wait for explicit approval** — *\"looks good\"* / "
-            "*\"ship it\"* / *\"yes push\"*. Same write-gate as every "
-            "other path.\n\n"
-            "8. **Push to DNG via `create_requirements`** with:\n"
-            "   - `module_name=...` — auto-creates module + auto-binds "
-            "reqs\n"
-            "   - For each req, prefix the `content` body with a Source "
-            "line:\n"
-            "     ```\n"
-            "     Source: JIRA-1234 — https://yourorg.atlassian.net/browse/JIRA-1234\n"
-            "\n"
-            "     <the actual requirement text>\n"
-            "     ```\n"
-            "     If the user wants a structured attribute instead, "
-            "follow up with "
-            "`update_requirement_attributes(requirement_url, "
-            "attributes={\"dcterms:source\": jira_url})` per req — "
-            "but default to the inline Source line.\n\n"
-            "9. **Post the Jira back-link via `addCommentToJiraIssue`**:\n"
+            "## Workflow (native elm-mcp Jira tools)\n\n"
+            "1. **Pull** — `get_jira_issue(issue_key=...)`. Surface "
+            "compact summary: key, type, status, summary, assignee, "
+            "counts. If config error, stop and surface credential setup.\n\n"
+            "2. **Walk graph** (see above).\n\n"
+            "3. **Parse into FIVE buckets** (same as /import-requirements):\n"
+            "   - Functional reqs (atomic 'shall' statements)\n"
+            "   - Non-functional reqs (perf, security, retention)\n"
+            "   - Acceptance criteria → HOLD for ETM\n"
+            "   - Constraints/Risks/Assumptions → ask once, default skip\n"
+            "   - Skipped (Business Goal, DoD, sprint metadata)\n\n"
+            "4. **Interview discipline** (v0.7.0 per-artifact gates). "
+            "Jira ticket = SEED material, not full set. Re-elicit.\n\n"
+            "5. **Preview** — counts + every item in full + Jira source "
+            "per item.\n\n"
+            "6. **Wait for explicit approval.**\n\n"
+            "7. **Push to DNG via `create_requirements`** with "
+            "`module_name=...` and a `Source:` line prefix on each "
+            "requirement's content:\n"
             "   ```\n"
-            "   📋 Imported to DNG (via elm-mcp / BOB)\n"
+            "   Source: JIRA-1234 — https://yourorg.atlassian.net/browse/JIRA-1234\n"
             "\n"
-            "   Module: [<DNG Module Title>](<module_url>)\n"
-            "\n"
-            "   Requirements:\n"
-            "   - [REQ-101: <title>](<req_url>)\n"
-            "   - [REQ-102: <title>](<req_url>)\n"
-            "   ...\n"
-            "\n"
-            "   Imported: <timestamp> UTC\n"
-            "   ```\n"
-            "   **Do this even if the user doesn't explicitly ask** — the "
-            "back-link is what makes this a round-trip rather than a "
-            "one-way drain.\n\n"
-            "10. **If a structured remote-link tool is exposed** by the "
-            "user's Atlassian MCP (names vary: "
-            "`createJiraRemoteIssueLink`, `addJiraWebLink`, etc. — "
-            "discover from the tool list at runtime), **prefer that** "
-            "over the comment. The comment is the guaranteed fallback.\n\n"
-            "11. **Surface URLs on both sides** — DNG module URL + every "
-            "requirement URL as markdown links + the Jira issue URL "
-            "(`https://<cloud>.atlassian.net/browse/<key>`). Both "
-            "audiences served.\n\n"
-            "12. **Offer next steps:**\n"
-            "    - *\"Want EWM tasks for these reqs?\"* (Step 3d) — and "
-            "if so, link each task back to Jira via "
-            "`link_workitem_to_external_url(workitem_url, "
-            "external_url=<jira_url>, label=\"Source\")` so EWM↔Jira "
-            "is also visible.\n"
-            "    - *\"Want ETM test cases from the held ACs?\"* "
-            "(Step 3e)\n"
-            "    - *\"Want a baseline snapshot?\"* (if config mgmt "
-            "is enabled)\n\n"
+            "   <the requirement text>\n"
+            "   ```\n\n"
+            "8. **Post Jira back-link via `add_jira_comment`** with a "
+            "markdown body listing the DNG URLs. Tool converts "
+            "paragraphs + bullets + links to ADF.\n\n"
+            "9. **Optional: `add_jira_remote_link`** with the DNG module "
+            "URL for a clean entry in Jira's Links panel.\n\n"
+            "10. **Surface URLs both sides.**\n\n"
+            "11. **Offer next steps** — EWM tasks (Step 3d), ETM test "
+            "cases (Step 3e), baseline.\n\n"
         )
 
         antipatterns = (
-            "## Anti-patterns — DO NOT\n\n"
-            "- ❌ Call Jira's REST API directly from elm-mcp. Use the "
-            "Atlassian MCP tools.\n"
-            "- ❌ Fork the Atlassian MCP. The integration lives in this "
-            "prompt, not in either MCP's code.\n"
-            "- ❌ Skip the interview because \"the ticket has a "
-            "description.\" Jira bodies are written for engineers with "
-            "shared context; DNG reqs must stand alone.\n"
-            "- ❌ Forget the Jira back-link. One-way pull ≠ round-trip.\n"
-            "- ❌ Ask the user for the cloudId. Call "
-            "`getAccessibleAtlassianResources` first.\n"
-            "- ❌ Push Jira ACs as DNG reqs. ACs go in ETM test cases.\n"
-            "- ❌ Auto-walk child stories. Ask first.\n"
-            "- ❌ Re-word the user's Jira content. Preserve phrasing; "
-            "only convert non-atomic statements to atomic shall-form.\n"
+            "## Anti-patterns\n\n"
+            "- ❌ Reach for Atlassian's hosted MCP. Use elm-mcp's "
+            "`get_jira_issue` (snake_case), not `getJiraIssue` (camelCase).\n"
+            "- ❌ Skip the interview because the ticket has a description.\n"
+            "- ❌ Forget the Jira back-link.\n"
+            "- ❌ Push Jira ACs as DNG reqs (ACs → ETM).\n"
+            "- ❌ Auto-walk child stories — ask first.\n"
+            "- ❌ Re-word user's Jira content — preserve phrasing.\n"
             "- ❌ Call `create_module` then `create_requirements` "
-            "separately. Use `module_name=` inside `create_requirements` "
-            "for auto-bind.\n"
+            "separately — use `module_name=` for auto-bind.\n"
         )
 
         return [PromptMessage(
             role="user",
             content=TextContent(type="text", text=(
-                intro + prereq_block + input_block + cloud_block
-                + walk_block + target_block + workflow + antipatterns
+                intro + input_block + walk_block + target_block
+                + workflow + antipatterns
             )),
         )]
 
@@ -3980,6 +3869,98 @@ async def list_tools() -> list[Tool]:
                 "health?' / 'are you connected?' / 'what's wrong?'. Returns "
                 "everything the user (or you) need to debug an issue without "
                 "running setup.py --diagnose by hand. Read-only."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        # ── Jira (direct REST, API-token auth) ─────────────────
+        #
+        # These tools talk to Atlassian Jira Cloud directly via the
+        # REST API using the user's email + API token (set in .env
+        # as JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN). They power
+        # the /import-jira workflow without depending on Atlassian's
+        # hosted MCP server (which uses OAuth and doesn't complete
+        # auth reliably in IBM Bob's embedded webview).
+        Tool(
+            name="get_jira_issue",
+            description=(
+                "Fetch a single Jira issue by key (e.g. 'PROJ-123') or by "
+                "the full browse URL. Returns key, url, summary, "
+                "description (flattened from ADF to markdown), status, "
+                "type, priority, assignee, reporter, parent, subtasks, "
+                "labels, last 5 comments, and counts. Entry point for "
+                "/import-jira. Read-only. Requires JIRA_BASE_URL, "
+                "JIRA_EMAIL, JIRA_API_TOKEN in .env."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Jira issue key (e.g. 'PROJ-123') OR a full browse URL. Both accepted."
+                    }
+                },
+                "required": ["issue_key"]
+            }
+        ),
+        Tool(
+            name="search_jira_issues",
+            description=(
+                "JQL search across Jira. Returns up to `max_results` "
+                "slim summaries (key, url, summary, status, type, "
+                "priority, assignee, updated). Useful for walking an "
+                "epic's children ('parent = EPIC-123'). Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jql": {"type": "string", "description": "Jira Query Language."},
+                    "max_results": {"type": "integer", "description": "1-100. Default 25.", "default": 25}
+                },
+                "required": ["jql"]
+            }
+        ),
+        Tool(
+            name="add_jira_comment",
+            description=(
+                "Post a comment on a Jira issue. Body accepts a "
+                "markdown-ish string: paragraphs, '- ' bullet lists, "
+                "'1. ' numbered lists, and [label](url) links are "
+                "converted to Atlassian Document Format. WRITES to Jira."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Jira issue key or browse URL."},
+                    "body": {"type": "string", "description": "Comment body in markdown-ish form."}
+                },
+                "required": ["issue_key", "body"]
+            }
+        ),
+        Tool(
+            name="add_jira_remote_link",
+            description=(
+                "Add a structured remote link on a Jira issue — renders "
+                "in Jira's 'Links' panel. Best for one-URL-with-a-title "
+                "cross-references. WRITES to Jira."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Jira issue key or browse URL."},
+                    "url": {"type": "string", "description": "Target URL (e.g. DNG module URL)."},
+                    "title": {"type": "string", "description": "Short title shown in Jira's Links panel."},
+                    "summary": {"type": "string", "description": "Optional longer description."}
+                },
+                "required": ["issue_key", "url", "title"]
+            }
+        ),
+        Tool(
+            name="jira_health",
+            description=(
+                "Diagnose Jira REST connection. Checks credentials "
+                "(JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN), calls "
+                "/rest/api/3/myself, returns the authenticated profile. "
+                "Read-only."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
@@ -8090,6 +8071,149 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             err = result.get('error', 'unknown') if result else 'unknown'
             return [TextContent(type="text", text=f"Error: {err}")]
+
+        # ── Jira (direct REST) — these don't need ELM connection ─
+        elif name in ("get_jira_issue", "search_jira_issues",
+                       "add_jira_comment", "add_jira_remote_link",
+                       "jira_health"):
+            try:
+                from jira_client import JiraClient
+                jira = JiraClient()
+            except RuntimeError as e:
+                return [TextContent(type="text", text=(
+                    f"Jira is not configured.\n\n{e}\n\n"
+                    "Quick fix: edit `~/.elm-mcp/.env` and add:\n"
+                    "```\n"
+                    "JIRA_BASE_URL=https://yourorg.atlassian.net\n"
+                    "JIRA_EMAIL=your-email@example.com\n"
+                    "JIRA_API_TOKEN=ATATT...\n"
+                    "```\n"
+                    "Get a token: "
+                    "https://id.atlassian.com/manage-profile/security/api-tokens\n\n"
+                    "Or run: python3 ~/.elm-mcp/setup.py --with-jira\n\n"
+                    "Then restart your AI host (Cmd+Q + reopen)."
+                ))]
+            except Exception as e:
+                return [TextContent(type="text", text=(
+                    f"Failed to initialize Jira client: {e}"
+                ))]
+
+            try:
+                if name == "get_jira_issue":
+                    key = arguments.get("issue_key", "").strip()
+                    if not key:
+                        return [TextContent(type="text", text=(
+                            "Error: issue_key is required."
+                        ))]
+                    issue = jira.get_issue(key)
+                    lines = [
+                        f"# {issue['key']} — {issue['summary']}",
+                        "",
+                        f"**URL:** {issue['url']}",
+                        f"**Type:** {issue['type'] or 'n/a'}    "
+                        f"**Status:** {issue['status'] or 'n/a'}    "
+                        f"**Priority:** {issue['priority'] or 'n/a'}",
+                        f"**Assignee:** {issue['assignee'] or 'unassigned'}    "
+                        f"**Reporter:** {issue['reporter'] or 'n/a'}",
+                        f"**Created:** {issue['created'] or 'n/a'}    "
+                        f"**Updated:** {issue['updated'] or 'n/a'}",
+                    ]
+                    if issue.get('labels'):
+                        lines.append(f"**Labels:** {', '.join(issue['labels'])}")
+                    if issue.get('parent'):
+                        p_ = issue['parent']
+                        lines.append(
+                            f"**Parent:** [{p_['key']}: {p_['summary']}]"
+                            f"({jira.base_url}/browse/{p_['key']}) "
+                            f"({p_.get('type', '')} / {p_.get('status', '')})"
+                        )
+                    if issue.get('subtasks'):
+                        lines.append(f"**Subtasks ({len(issue['subtasks'])}):**")
+                        for st in issue['subtasks']:
+                            lines.append(
+                                f"  - [{st['key']}: {st['summary']}]"
+                                f"({jira.base_url}/browse/{st['key']}) "
+                                f"({st.get('status', '')})"
+                            )
+                    lines += ["", "## Description", "",
+                              issue.get('description') or "_(empty)_"]
+                    if issue.get('comments_preview'):
+                        lines += ["", f"## Last {len(issue['comments_preview'])} "
+                                       f"comments (of {issue.get('comments_count', 0)})",
+                                  ""]
+                        for c in issue['comments_preview']:
+                            lines.append(f"**{c['author']}** — {c['created']}")
+                            lines.append("")
+                            lines.append((c.get('body') or '').rstrip())
+                            lines.append("")
+                    elif issue.get('comments_count', 0):
+                        lines += ["", f"_({issue['comments_count']} comments — "
+                                       f"not previewed)_"]
+                    return [TextContent(type="text", text="\n".join(lines))]
+
+                if name == "search_jira_issues":
+                    jql = arguments.get("jql", "").strip()
+                    max_results = arguments.get("max_results", 25)
+                    if not jql:
+                        return [TextContent(type="text", text="Error: jql is required.")]
+                    issues = jira.search_issues(jql, max_results=max_results)
+                    if not issues:
+                        return [TextContent(type="text", text=f"No issues match JQL: `{jql}`")]
+                    lines = [f"# Jira Search Results ({len(issues)} issues)", "",
+                             f"_JQL:_ `{jql}`", ""]
+                    for it in issues:
+                        lines.append(
+                            f"- [`{it['key']}`]({it['url']}) **{it['summary']}** "
+                            f"— {it.get('type', '')} / {it.get('status', '')} / "
+                            f"{it.get('assignee') or 'unassigned'}"
+                        )
+                    return [TextContent(type="text", text="\n".join(lines))]
+
+                if name == "add_jira_comment":
+                    key = arguments.get("issue_key", "").strip()
+                    body = arguments.get("body", "")
+                    if not key or not body:
+                        return [TextContent(type="text", text=(
+                            "Error: issue_key and body are required."
+                        ))]
+                    result = jira.add_comment(key, body)
+                    return [TextContent(type="text", text=(
+                        f"✅ Posted comment on {jira._normalize_key(key)}.\n\n"
+                        f"**Comment URL:** {result['url']}"
+                    ))]
+
+                if name == "add_jira_remote_link":
+                    key = arguments.get("issue_key", "").strip()
+                    target = arguments.get("url", "").strip()
+                    title = arguments.get("title", "").strip()
+                    summary = arguments.get("summary", "").strip() or None
+                    if not (key and target and title):
+                        return [TextContent(type="text", text=(
+                            "Error: issue_key, url, and title are required."
+                        ))]
+                    jira.add_remote_link(key, target, title, summary=summary)
+                    return [TextContent(type="text", text=(
+                        f"✅ Added remote link on {jira._normalize_key(key)}:\n"
+                        f"  - **{title}** → {target}\n\n"
+                        f"Renders in the Jira issue's 'Links' panel."
+                    ))]
+
+                if name == "jira_health":
+                    profile = jira.whoami()
+                    return [TextContent(type="text", text=(
+                        f"# Jira — Health Check\n\n"
+                        f"✅ Connected.\n\n"
+                        f"- **Base URL:** {profile['base_url']}\n"
+                        f"- **Authenticated as:** "
+                        f"{profile.get('displayName') or 'n/a'} "
+                        f"({profile.get('emailAddress') or 'n/a'})\n"
+                        f"- **Account ID:** {profile.get('accountId') or 'n/a'}\n"
+                    ))]
+            except RuntimeError as e:
+                return [TextContent(type="text", text=f"Jira error: {e}")]
+            except Exception as e:
+                return [TextContent(type="text",
+                                     text=f"Unexpected Jira error: {e}")]
 
         # ── elm_mcp_health (self-diagnose) ─────────────────────────
         elif name == "elm_mcp_health":

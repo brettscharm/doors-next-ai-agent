@@ -64,7 +64,7 @@ Bob should respond with your DNG projects. **You're done.** Try one of these nex
 |---|---|
 | *"build me a [thing]"* | Full agentic flow: requirements → tasks → tests → review pause → code |
 | *"import this Jira epic [paste text or PDF path]"* | Parses the epic into ELM artifacts (epic + reqs + tests + cross-links) |
-| *"import JIRA-1234"* / *"/import-jira"* | **Live** Jira pull via the BOB Atlassian Connector — fetches the issue, interviews you, creates DNG requirements with `Source: JIRA-XXX` stamp, posts a back-link comment on the Jira issue. Requires `--with-atlassian` setup (see below). |
+| *"import JIRA-1234"* / *"/import-jira"* | **Live** Jira pull via elm-mcp's native Jira tools — fetches the issue, interviews you, creates DNG requirements with `Source: JIRA-XXX` stamp, posts a back-link comment on the Jira issue. Talks to Jira REST directly (API token, no OAuth). Requires `--with-jira` setup (see below). |
 | *"show me the reqs in [module]"* | Reads the module from DNG, summarizes |
 | *"what's the team doing?"* | Reads the BOB Team Actions module, summarizes who did what |
 | *"resume my last build"* | Picks up an in-progress build run from where you left off |
@@ -111,25 +111,28 @@ curl -fsSL https://raw.githubusercontent.com/brettscharm/elm-mcp/main/install.sh
 
 ---
 
-## Optional: live Jira integration (BOB Atlassian Connector)
+## Optional: live Jira integration (`/import-jira`)
 
-If you want Bob to pull live Jira issues into DNG and post back-link comments to Jira (round-trip traceability), install the **BOB Atlassian Connector**:
+If you want Bob to pull live Jira issues into DNG and post back-link comments to Jira (round-trip traceability), add Jira credentials to your `.env`:
 
 ```bash
 # If you already have elm-mcp installed:
-python3 ~/.elm-mcp/setup.py --atlassian-only
+python3 ~/.elm-mcp/setup.py --with-jira
 
-# If you're installing elm-mcp for the first time and want both:
-python3 ~/.elm-mcp/setup.py --with-atlassian
+# Or edit ~/.elm-mcp/.env directly and add:
+#   JIRA_BASE_URL=https://yourorg.atlassian.net
+#   JIRA_EMAIL=your-atlassian-email@example.com
+#   JIRA_API_TOKEN=ATATT...
+# Token: https://id.atlassian.com/manage-profile/security/api-tokens
 ```
 
-Prerequisite: **Node.js** installed (`brew install node` on macOS, or grab it from https://nodejs.org). The connector uses the upstream `mcp-remote` npm package as a stdio↔HTTP bridge so that Bob (which speaks stdio only) can talk to Atlassian's hosted MCP server at `https://mcp.atlassian.com/v1/mcp`.
+**How it works:** elm-mcp talks to Jira's REST API **directly** using your email + API token (HTTP Basic auth). No Atlassian MCP server, no `mcp-remote` bridge, no OAuth, no Node.js. Five tools are added: `get_jira_issue`, `search_jira_issues`, `add_jira_comment`, `add_jira_remote_link`, `jira_health`.
 
-**What it does NOT do:** we don't run a Jira server. Atlassian does. The connector is just config + a bridge — your Jira credentials live in your Atlassian OAuth session, not in elm-mcp.
+**Why this instead of Atlassian's official MCP?** Atlassian's hosted MCP at `mcp.atlassian.com/v1/mcp` uses OAuth 2.1 and the OAuth flow doesn't complete reliably inside IBM Bob's embedded webview — verified in the field. Going direct-REST sidesteps the problem.
 
-After install:
-1. Quit + reopen Bob.
-2. First Jira tool call opens a browser tab for Atlassian OAuth — log in, grant access, close the tab. The token caches at `~/.mcp-auth/` for future runs.
+After credentials are in `.env`:
+1. Quit + reopen Bob (so it picks up the new tools).
+2. Run `jira_health` in chat to confirm auth works.
 3. Try it: *"`/import-jira issue_key=PROJ-123`"* — Bob fetches the issue, interviews you, creates DNG requirements with `Source: PROJ-123 — <jira-url>` stamped on each, then posts a comment back to Jira listing all the created DNG URLs.
 
 See `BOB.md` Step 3l for the full workflow.
